@@ -9,9 +9,10 @@ RUN npm run build
 # Stage 2: Final Backend Container
 FROM python:3.11-slim AS runner
 
-# Install FFmpeg and system dependencies
+# Install FFmpeg, git, and system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    git \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -22,9 +23,15 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy submodules and app code
-COPY AnimeSamaApi /app/AnimeSamaApi
-COPY voiranime_API /app/voiranime_API
+# Clone submodules directly (avoids empty submodule dirs if not initialized on host)
+RUN git clone --depth 1 https://github.com/TMCooper/AnimeSamaApi.git /app/AnimeSamaApi \
+    && git clone --depth 1 https://github.com/TMCooper/voiranime_API.git /app/voiranime_API
+
+# Install submodule-specific Python dependencies
+RUN pip install --no-cache-dir -r /app/AnimeSamaApi/requirements.txt || true
+RUN pip install --no-cache-dir -r /app/voiranime_API/requirements.txt || true
+
+# Copy app backend code
 COPY backend /app/backend
 RUN mkdir -p /app/data
 

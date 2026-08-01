@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  nami:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nami_anime_app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Data directory for persistent app settings & downloads database
+      - ./data:/app/data
+      # Volume mount for downloads (Map your external drive or root folder here)
+      # Example Windows drive mapping: - D:/root folder:/downloads
+      - ./downloads:/downloads
+    environment:
+      - PYTHONUNBUFFERED=1

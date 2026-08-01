@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
+import HistoryView from './components/HistoryView';
 import AnimeDetailModal from './components/AnimeDetailModal';
 import VideoPlayerModal from './components/VideoPlayerModal';
 import DownloadManagerDrawer from './components/DownloadManagerDrawer';
@@ -9,56 +10,50 @@ import SettingsModal from './components/SettingsModal';
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState('all');
+  const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' or 'history'
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Modals & Drawers state
+  // Modals & Drawers
   const [selectedAnime, setSelectedAnime] = useState(null);
-  const [activePlayer, setActivePlayer] = useState(null); // { anime, season, episode, episodes }
+  const [activePlayer, setActivePlayer] = useState(null); // { animeTitle, season, episode, episodes }
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Downloads state
   const [downloads, setDownloads] = useState([]);
 
-  // Fetch initial popular/recent items or run search
   const handleSearch = () => {
     if (!searchQuery.trim()) return;
     setIsLoading(true);
+    setActiveTab('catalog');
 
     fetch(`/api/search?q=${encodeURIComponent(searchQuery.trim())}&source=${activeSource}`)
       .then((res) => res.json())
-      .then((data) => {
-        setResults(data.results || []);
-      })
+      .then((data) => setResults(data.results || []))
       .catch((err) => console.error("Search error:", err))
       .finally(() => setIsLoading(false));
   };
 
-  // Run search when source tab changes or initial query provided
   useEffect(() => {
     if (searchQuery.trim()) {
       handleSearch();
     } else {
-      // Default search for popular anime on home load
       setIsLoading(true);
       fetch(`/api/search?q=Frieren&source=${activeSource}`)
         .then((res) => res.json())
-        .then((data) => {
-          setResults(data.results || []);
-        })
+        .then((data) => setResults(data.results || []))
         .catch((err) => console.error("Error fetching default anime:", err))
         .finally(() => setIsLoading(false));
     }
   }, [activeSource]);
 
-  // Poll downloads status every 2 seconds
   useEffect(() => {
     const fetchDownloads = () => {
       fetch('/api/downloads')
         .then((res) => res.json())
         .then((data) => setDownloads(data || []))
-        .catch((err) => console.error("Error fetching downloads:", err));
+        .catch(() => {});
     };
 
     fetchDownloads();
@@ -68,21 +63,19 @@ export default function App() {
 
   const activeDownloadsCount = downloads.filter((d) => d.status === 'downloading' || d.status === 'queued').length;
 
-  // Single episode play handler
-  const handlePlayEpisode = (anime, season, episode, episodesList) => {
+  const handlePlayEpisode = (animeTitle, season, episode, episodesList) => {
     setActivePlayer({
-      anime,
+      animeTitle,
       season,
       episode,
       episodes: episodesList
     });
   };
 
-  // Single episode download handler
   const handleDownloadEpisode = (animeTitle, season, episode) => {
     const embedUrl = episode.embed_url || episode.url;
 
-    fetch(`/api/resolve?embed_url=${encodeURIComponent(embedUrl)}&source=anime_sama`)
+    fetch(`/api/resolve?embed_url=${encodeURIComponent(embedUrl)}`)
       .then((res) => res.json())
       .then((data) => {
         const streamUrl = data.stream_url || embedUrl;
@@ -94,22 +87,19 @@ export default function App() {
           body: JSON.stringify({
             anime_title: animeTitle,
             season: season,
-            episode_num: episode.num || episode.title || '1',
+            episode_num: String(episode.num || episode.title || '1'),
             stream_url: streamUrl,
             stream_type: streamType
           })
         });
       })
-      .then(() => {
-        setIsDownloadsOpen(true);
-      })
+      .then(() => setIsDownloadsOpen(true))
       .catch((err) => console.error("Error launching download:", err));
   };
 
-  // Bulk season download handler
   const handleDownloadBulk = (animeTitle, season, episodesList) => {
     const payloadEpisodes = episodesList.map((ep) => ({
-      episode_num: ep.num || ep.title || '1',
+      episode_num: String(ep.num || ep.title || '1'),
       stream_url: ep.embed_url || ep.url,
       stream_type: 'm3u8'
     }));
@@ -127,14 +117,6 @@ export default function App() {
       .catch((err) => console.error("Error bulk downloading:", err));
   };
 
-  const handleCancelDownload = (taskId) => {
-    fetch(`/api/downloads/cancel/${taskId}`, { method: 'POST' });
-  };
-
-  const handleClearCompleted = () => {
-    fetch('/api/downloads/clear', { method: 'POST' });
-  };
-
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Header
@@ -143,17 +125,26 @@ export default function App() {
         onSearch={handleSearch}
         activeSource={activeSource}
         setActiveSource={setActiveSource}
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
         activeDownloadsCount={activeDownloadsCount}
         onOpenDownloads={() => setIsDownloadsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
-      <main style={{ flex: 1, padding: '0 28px', maxWidth: '1440px', width: '100%', margin: '0 auto' }}>
-        <CatalogGrid
-          results={results}
-          isLoading={isLoading}
-          onSelectAnime={(anime) => setSelectedAnime(anime)}
-        />
+      <main style={{ flex: 1, padding: '0 24px', maxWidth: '1400px', width: '100%', margin: '0 auto' }}>
+        {activeTab === 'catalog' ? (
+          <CatalogGrid
+            results={results}
+            isLoading={isLoading}
+            onSelectAnime={(anime) => setSelectedAnime(anime)}
+          />
+        ) : (
+          <HistoryView
+            onSelectAnime={(anime) => setSelectedAnime(anime)}
+            onPlayEpisode={(anime, season, ep, eps) => handlePlayEpisode(anime.title, season, ep, eps)}
+          />
+        )}
       </main>
 
       {/* Anime Detail Modal */}
@@ -161,7 +152,7 @@ export default function App() {
         <AnimeDetailModal
           anime={selectedAnime}
           onClose={() => setSelectedAnime(null)}
-          onPlayEpisode={handlePlayEpisode}
+          onPlayEpisode={(animeTitle, season, ep, eps) => handlePlayEpisode(animeTitle, season, ep, eps)}
           onDownloadEpisode={handleDownloadEpisode}
           onDownloadBulk={handleDownloadBulk}
         />
@@ -170,7 +161,7 @@ export default function App() {
       {/* Video Player Modal */}
       {activePlayer && (
         <VideoPlayerModal
-          anime={activePlayer.anime}
+          animeTitle={activePlayer.animeTitle}
           season={activePlayer.season}
           episode={activePlayer.episode}
           episodes={activePlayer.episodes}
@@ -187,8 +178,8 @@ export default function App() {
         isOpen={isDownloadsOpen}
         onClose={() => setIsDownloadsOpen(false)}
         downloads={downloads}
-        onCancelTask={handleCancelDownload}
-        onClearCompleted={handleClearCompleted}
+        onCancelTask={(id) => fetch(`/api/downloads/cancel/${id}`, { method: 'POST' })}
+        onClearCompleted={() => fetch('/api/downloads/clear', { method: 'POST' })}
       />
 
       {/* Settings Modal */}

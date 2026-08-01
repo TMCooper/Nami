@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { X, Download, CheckCircle, AlertCircle, Trash2, StopCircle, HardDrive } from 'lucide-react';
 
 export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCancelTask, onClearCompleted }) {
@@ -11,15 +11,15 @@ export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCa
       zIndex: 55,
       display: 'flex',
       justifyContent: 'flex-end',
-      background: 'rgba(0, 0, 0, 0.6)',
+      background: 'rgba(0, 0, 0, 0.5)',
       backdropFilter: 'blur(4px)'
     }} onClick={onClose}>
       <div
-        className="glass-modal animate-fade-in"
+        className="surface animate-fade-in"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: '460px',
+          maxWidth: '420px',
           height: '100%',
           display: 'flex',
           flexDirection: 'column',
@@ -29,42 +29,32 @@ export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCa
       >
         {/* Drawer Header */}
         <div style={{
-          padding: '20px 24px',
+          padding: '16px 20px',
           borderBottom: '1px solid var(--border-color)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <Download size={20} color="var(--primary)" />
-            <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Téléchargements</h3>
-          </div>
-
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button
-              className="btn btn-secondary btn-icon"
-              style={{ width: '36px', height: '36px' }}
-              onClick={onClearCompleted}
-              title="Nettoyer les éléments terminés"
-            >
-              <Trash2 size={16} />
+            <Download size={18} color="var(--accent-cyan)" />
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>Téléchargements</h3>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <button className="btn btn-secondary btn-icon" style={{ width: '32px', height: '32px' }} onClick={onClearCompleted} title="Nettoyer">
+              <Trash2 size={14} />
             </button>
-            <button
-              className="btn btn-secondary btn-icon"
-              style={{ width: '36px', height: '36px' }}
-              onClick={onClose}
-            >
-              <X size={18} />
+            <button className="btn btn-secondary btn-icon" style={{ width: '32px', height: '32px' }} onClick={onClose}>
+              <X size={16} />
             </button>
           </div>
         </div>
 
         {/* Downloads List */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {(!downloads || downloads.length === 0) ? (
-            <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: '80px' }}>
-              <Download size={40} style={{ opacity: 0.3, marginBottom: '12px' }} />
-              <p>Aucun téléchargement en cours ou récent.</p>
+            <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: '60px' }}>
+              <Download size={36} style={{ opacity: 0.2, marginBottom: '10px' }} />
+              <p style={{ fontSize: '0.88rem' }}>Aucun téléchargement.</p>
             </div>
           ) : (
             downloads.map((task) => {
@@ -75,60 +65,50 @@ export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCa
               return (
                 <div
                   key={task.id}
-                  className="glass"
+                  className="surface-card"
                   style={{
-                    padding: '16px',
-                    borderRadius: 'var(--radius-md)',
+                    padding: '12px',
+                    borderRadius: 'var(--radius-sm)',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '10px',
-                    border: isDownloading ? '1px solid var(--primary-glow)' : '1px solid var(--border-color)'
+                    gap: '8px'
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <div>
-                      <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{task.anime_title}</h4>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                        {task.season} — Épisode {task.episode_num}
+                      <h4 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff' }}>{task.anime_title}</h4>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        {task.season} — Ép. {task.episode_num}
                       </p>
                     </div>
-
                     {isDownloading && (
-                      <button
-                        className="btn btn-secondary btn-icon"
-                        style={{ width: '28px', height: '28px' }}
-                        onClick={() => onCancelTask(task.id)}
-                        title="Annuler"
-                      >
-                        <StopCircle size={14} color="var(--accent-pink)" />
+                      <button className="btn btn-secondary btn-icon" style={{ width: '26px', height: '26px' }} onClick={() => onCancelTask(task.id)} title="Annuler">
+                        <StopCircle size={12} color="var(--primary)" />
                       </button>
                     )}
                   </div>
 
                   {/* Progress Bar */}
-                  <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.1)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
+                  <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.08)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
                     <div style={{
                       width: `${task.progress || 0}%`,
                       height: '100%',
-                      background: isCompleted ? 'var(--accent-green)' : isError ? 'var(--accent-pink)' : 'linear-gradient(90deg, var(--primary), var(--secondary))',
+                      background: isCompleted ? 'var(--accent-green)' : isError ? 'var(--primary)' : 'var(--accent-cyan)',
                       transition: 'width 0.3s ease'
                     }}></div>
                   </div>
 
-                  {/* Status Footer */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem' }}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: isCompleted ? 'var(--accent-green)' : isError ? 'var(--accent-pink)' : 'var(--text-muted)' }}>
-                      {isCompleted && <CheckCircle size={12} />}
-                      {isError && <AlertCircle size={12} />}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: isCompleted ? 'var(--accent-green)' : isError ? 'var(--primary)' : 'var(--text-muted)' }}>
+                      {isCompleted && <><CheckCircle size={11} /> Terminé</>}
+                      {isError && <><AlertCircle size={11} /> Erreur</>}
                       {task.status === 'queued' && 'En attente...'}
                       {task.status === 'downloading' && `${task.progress}% — ${task.speed}`}
-                      {task.status === 'completed' && 'Téléchargement terminé'}
-                      {task.status === 'error' && `Erreur: ${task.error_message}`}
+                      {task.status === 'cancelled' && 'Annulé'}
                     </span>
-
                     {task.file_path && (
-                      <span style={{ color: 'var(--text-dim)', fontSize: '0.7rem' }} title={task.file_path}>
-                        <HardDrive size={10} style={{ display: 'inline', marginRight: '3px' }} />
+                      <span style={{ color: 'var(--text-dim)', fontSize: '0.68rem' }} title={task.file_path}>
+                        <HardDrive size={9} style={{ display: 'inline', marginRight: '2px' }} />
                         {task.file_path.split(/[/\\]/).slice(-2).join('/')}
                       </span>
                     )}

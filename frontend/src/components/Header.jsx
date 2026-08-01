@@ -1,5 +1,5 @@
-import React from 'react';
-import { Search, Download, Settings, Tv, Film, Layers } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Search, Download, Settings, RefreshCw, Layers, Tv, Film, History, Bookmark } from 'lucide-react';
 
 export default function Header({ 
   searchQuery, 
@@ -7,10 +7,44 @@ export default function Header({
   onSearch, 
   activeSource, 
   setActiveSource, 
+  activeTab,
+  setActiveTab,
   activeDownloadsCount, 
   onOpenDownloads, 
   onOpenSettings 
 }) {
+  const [catalogStatus, setCatalogStatus] = useState(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Poll catalog update status every 3s
+  useEffect(() => {
+    const checkStatus = () => {
+      fetch('/api/catalog/status')
+        .then((res) => res.json())
+        .then((data) => {
+          setCatalogStatus(data);
+          if (data.is_updating) {
+            setIsRefreshing(true);
+          } else {
+            setIsRefreshing(false);
+          }
+        })
+        .catch(() => {});
+    };
+
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRefreshCatalog = () => {
+    setIsRefreshing(true);
+    fetch(`/api/catalog/update?source=${activeSource}`, { method: 'POST' })
+      .then((res) => res.json())
+      .then((data) => setCatalogStatus(data))
+      .catch((err) => console.error("Error launching refresh:", err));
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') {
       onSearch();
@@ -18,130 +52,180 @@ export default function Header({
   };
 
   return (
-    <header className="glass" style={{
+    <header className="surface" style={{
       position: 'sticky',
       top: 0,
       zIndex: 40,
-      padding: '14px 28px',
+      padding: '12px 24px',
+      borderBottom: '1px solid var(--border-color)',
       display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: '20px',
-      borderBottom: '1px solid var(--border-color)'
+      flexDirection: 'column',
+      gap: '12px'
     }}>
-      {/* Logo */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} onClick={() => setSearchQuery('')}>
-        <div style={{
-          width: '42px',
-          height: '42px',
-          borderRadius: '12px',
-          background: 'linear-gradient(135deg, var(--primary), var(--secondary))',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: '1.4rem',
-          boxShadow: '0 0 15px rgba(0, 240, 255, 0.3)'
-        }}>
-          波
-        </div>
-        <div>
-          <h1 style={{ fontSize: '1.4rem', fontWeight: 800, letterSpacing: '-0.5px', background: 'linear-gradient(90deg, #fff, var(--primary))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-            NAMI
-          </h1>
-          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 500 }}>Anime Stream & Download</p>
-        </div>
-      </div>
-
-      {/* Source Selector & Search Bar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flex: 1, maxWidth: '650px' }}>
-        {/* Source Pills */}
-        <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}>
-          <button 
-            className={`btn ${activeSource === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '6px 12px', fontSize: '0.82rem', borderRadius: 'var(--radius-sm)' }}
-            onClick={() => setActiveSource('all')}
-          >
-            <Layers size={14} /> Tous
-          </button>
-          <button 
-            className={`btn ${activeSource === 'anime_sama' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '6px 12px', fontSize: '0.82rem', borderRadius: 'var(--radius-sm)' }}
-            onClick={() => setActiveSource('anime_sama')}
-          >
-            <Tv size={14} /> Anime Sama
-          </button>
-          <button 
-            className={`btn ${activeSource === 'voiranime' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '6px 12px', fontSize: '0.82rem', borderRadius: 'var(--radius-sm)' }}
-            onClick={() => setActiveSource('voiranime')}
-          >
-            <Film size={14} /> VoirAnime
-          </button>
+      {/* Top Row: Logo, Search, Controls */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+        {/* Logo */}
+        <div 
+          style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+          onClick={() => {
+            setSearchQuery('');
+            setActiveTab('catalog');
+          }}
+        >
+          <div style={{
+            width: '36px',
+            height: '36px',
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--primary)',
+            color: '#fff',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 800,
+            fontSize: '1.2rem'
+          }}>
+            N
+          </div>
+          <span style={{ fontSize: '1.3rem', fontWeight: 800, letterSpacing: '-0.5px' }}>
+            NAMI <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 500 }}>.anime</span>
+          </span>
         </div>
 
         {/* Search Bar */}
-        <div style={{ position: 'relative', flex: 1 }}>
-          <Search size={18} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+        <div style={{ position: 'relative', flex: 1, maxWidth: '500px' }}>
+          <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
           <input
             type="text"
-            placeholder="Rechercher un anime (ex: Frieren, Solo Leveling)..."
+            placeholder="Rechercher un anime (ex: Frieren, Naruto, Solo Leveling)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             style={{
               width: '100%',
-              padding: '10px 16px 10px 42px',
-              background: 'rgba(255, 255, 255, 0.05)',
+              padding: '8px 14px 8px 36px',
+              background: '#0D1117',
               border: '1px solid var(--border-color)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-sm)',
               color: '#fff',
-              fontSize: '0.9rem',
-              outline: 'none',
-              transition: 'var(--transition)'
+              fontSize: '0.88rem',
+              outline: 'none'
             }}
           />
         </div>
+
+        {/* Top Right Actions */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* Refresh Catalog Button */}
+          <button
+            className={`btn ${isRefreshing ? 'btn-secondary' : 'btn-secondary'}`}
+            onClick={handleRefreshCatalog}
+            disabled={isRefreshing}
+            style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+            title="Actualiser la base de données d'animes"
+          >
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+            <span>{isRefreshing ? 'Actualisation...' : 'Actualiser DB'}</span>
+          </button>
+
+          {/* Downloads Drawer Button */}
+          <button
+            className="btn btn-secondary"
+            onClick={onOpenDownloads}
+            style={{ position: 'relative', fontSize: '0.8rem', padding: '6px 12px' }}
+          >
+            <Download size={14} />
+            <span>Téléchargements</span>
+            {activeDownloadsCount > 0 && (
+              <span style={{
+                background: 'var(--primary)',
+                color: '#fff',
+                fontSize: '0.7rem',
+                fontWeight: 800,
+                padding: '1px 6px',
+                borderRadius: 'var(--radius-full)',
+                marginLeft: '4px'
+              }}>
+                {activeDownloadsCount}
+              </span>
+            )}
+          </button>
+
+          {/* Settings Button */}
+          <button className="btn btn-icon btn-secondary" onClick={onOpenSettings} title="Paramètres">
+            <Settings size={16} />
+          </button>
+        </div>
       </div>
 
-      {/* Action Buttons */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <button 
-          className="btn btn-secondary" 
-          onClick={onOpenDownloads}
-          style={{ position: 'relative' }}
-          title="Gestionnaire de Téléchargements"
-        >
-          <Download size={18} />
-          <span>Téléchargements</span>
-          {activeDownloadsCount > 0 && (
-            <span style={{
-              position: 'absolute',
-              top: '-4px',
-              right: '-4px',
-              background: 'var(--accent-pink)',
-              color: '#fff',
-              fontSize: '0.7rem',
-              fontWeight: 800,
-              width: '20px',
-              height: '20px',
-              borderRadius: '50%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 10px var(--accent-pink)'
-            }}>
-              {activeDownloadsCount}
-            </span>
-          )}
-        </button>
+      {/* Bottom Row: Navigation Tabs & Source Selector */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+        {/* Nav Tabs */}
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button
+            className={`btn ${activeTab === 'catalog' ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ padding: '6px 14px', fontSize: '0.82rem' }}
+            onClick={() => setActiveTab('catalog')}
+          >
+            <Layers size={14} /> Catalogue
+          </button>
 
-        <button 
-          className="btn btn-icon btn-secondary" 
-          onClick={onOpenSettings}
-          title="Paramètres"
-        >
-          <Settings size={18} />
-        </button>
+          <button
+            className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ padding: '6px 14px', fontSize: '0.82rem' }}
+            onClick={() => setActiveTab('history')}
+          >
+            <History size={14} /> Historique & Reprise
+          </button>
+        </div>
+
+        {/* Source Pills */}
+        <div style={{ display: 'flex', gap: '4px', background: '#0D1117', padding: '2px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+          <button
+            style={{
+              padding: '4px 10px',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              borderRadius: 'var(--radius-sm)',
+              border: 'none',
+              background: activeSource === 'all' ? '#21262D' : 'transparent',
+              color: activeSource === 'all' ? '#fff' : 'var(--text-muted)',
+              cursor: 'pointer'
+            }}
+            onClick={() => setActiveSource('all')}
+          >
+            Tous
+          </button>
+          <button
+            style={{
+              padding: '4px 10px',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              borderRadius: 'var(--radius-sm)',
+              border: 'none',
+              background: activeSource === 'anime_sama' ? '#21262D' : 'transparent',
+              color: activeSource === 'anime_sama' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+              cursor: 'pointer'
+            }}
+            onClick={() => setActiveSource('anime_sama')}
+          >
+            Anime-Sama
+          </button>
+          <button
+            style={{
+              padding: '4px 10px',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              borderRadius: 'var(--radius-sm)',
+              border: 'none',
+              background: activeSource === 'voiranime' ? '#21262D' : 'transparent',
+              color: activeSource === 'voiranime' ? 'var(--primary)' : 'var(--text-muted)',
+              cursor: 'pointer'
+            }}
+            onClick={() => setActiveSource('voiranime')}
+          >
+            VoirAnime
+          </button>
+        </div>
       </div>
     </header>
   );

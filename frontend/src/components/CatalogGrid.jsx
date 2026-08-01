@@ -1,17 +1,21 @@
 import React from 'react';
-import { Play, Tv, Film, Info } from 'lucide-react';
+import { Play } from 'lucide-react';
 
 export default function CatalogGrid({ results, isLoading, onSelectAnime }) {
   if (isLoading) {
     return (
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-        gap: '24px',
-        padding: '30px 0'
+        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gap: '16px',
+        padding: '24px 0'
       }}>
-        {[...Array(10)].map((_, i) => (
-          <div key={i} className="glass" style={{ borderRadius: 'var(--radius-md)', height: '300px', opacity: 0.5, animation: 'pulseGlow 1.5s infinite' }}></div>
+        {[...Array(12)].map((_, i) => (
+          <div key={i} className="surface-card" style={{
+            borderRadius: 'var(--radius-sm)',
+            height: '280px',
+            opacity: 0.4
+          }}></div>
         ))}
       </div>
     );
@@ -24,26 +28,26 @@ export default function CatalogGrid({ results, isLoading, onSelectAnime }) {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        minHeight: '400px',
+        minHeight: '350px',
         textAlign: 'center',
-        gap: '16px',
+        gap: '12px',
         color: 'var(--text-muted)'
       }}>
         <div style={{
-          width: '80px',
-          height: '80px',
+          width: '60px',
+          height: '60px',
           borderRadius: '50%',
-          background: 'rgba(255, 255, 255, 0.05)',
+          background: '#21262D',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          fontSize: '2.5rem'
+          fontSize: '1.8rem'
         }}>
           🔍
         </div>
-        <h3 style={{ fontSize: '1.4rem', color: '#fff' }}>Aucun anime trouvé</h3>
-        <p style={{ maxWidth: '400px', fontSize: '0.9rem' }}>
-          Taper un mot-clé dans la barre de recherche ci-dessus pour parcourir Anime-Sama et VoirAnime.
+        <h3 style={{ fontSize: '1.2rem', color: '#fff' }}>Aucun résultat</h3>
+        <p style={{ maxWidth: '380px', fontSize: '0.88rem' }}>
+          Rechercher un anime ci-dessus ou cliquer sur "Actualiser DB" pour peupler le catalogue.
         </p>
       </div>
     );
@@ -52,97 +56,97 @@ export default function CatalogGrid({ results, isLoading, onSelectAnime }) {
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
-      gap: '24px',
-      padding: '30px 0'
+      gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+      gap: '16px',
+      padding: '24px 0'
     }}>
       {results.map((anime, index) => {
         const isAnimeSama = anime.source === 'anime_sama';
         return (
           <div
             key={anime.id || index}
-            className="glass animate-fade-in"
+            className="animate-fade-in"
             onClick={() => onSelectAnime(anime)}
             style={{
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-sm)',
               overflow: 'hidden',
               cursor: 'pointer',
               position: 'relative',
               transition: 'var(--transition)',
               display: 'flex',
               flexDirection: 'column',
+              background: 'var(--bg-card)',
               border: '1px solid var(--border-color)'
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.transform = 'translateY(-6px)';
-              e.currentTarget.style.borderColor = 'var(--primary-glow)';
-              e.currentTarget.style.boxShadow = '0 10px 30px rgba(0, 240, 255, 0.15)';
+              e.currentTarget.style.transform = 'translateY(-4px)';
+              e.currentTarget.style.borderColor = 'var(--border-active)';
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.transform = 'translateY(0)';
               e.currentTarget.style.borderColor = 'var(--border-color)';
-              e.currentTarget.style.boxShadow = 'none';
             }}
           >
             {/* Poster Image */}
-            <div style={{ position: 'relative', width: '100%', height: '280px', overflow: 'hidden', background: '#121724' }}>
+            <div style={{ position: 'relative', width: '100%', height: '260px', overflow: 'hidden', background: '#0D1117' }}>
               <img
-                src={anime.cover || 'https://via.placeholder.com/280x380/0d1322/00f0ff?text=NAMI'}
+                src={anime.cover || 'https://via.placeholder.com/280x380/0d1117/8b949e?text=No+Image'}
                 alt={anime.title}
                 onError={(e) => {
-                  e.target.src = 'https://via.placeholder.com/280x380/0d1322/00f0ff?text=NAMI';
+                  e.target.src = 'https://via.placeholder.com/280x380/0d1117/8b949e?text=No+Image';
                 }}
                 style={{
                   width: '100%',
                   height: '100%',
                   objectFit: 'cover',
-                  transition: 'transform 0.4s ease'
+                  transition: 'transform 0.3s ease'
                 }}
+                onMouseEnter={(e) => e.target.style.transform = 'scale(1.05)'}
+                onMouseLeave={(e) => e.target.style.transform = 'scale(1)'}
               />
 
               {/* Source Badge */}
-              <div style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 10 }}>
+              <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5 }}>
                 <span className={`badge ${isAnimeSama ? 'badge-anime-sama' : 'badge-voiranime'}`}>
                   {isAnimeSama ? 'Anime-Sama' : 'VoirAnime'}
                 </span>
               </div>
 
-              {/* Hover Overlay Button */}
-              <div style={{
-                position: 'absolute',
-                inset: 0,
-                background: 'linear-gradient(to top, rgba(8, 12, 20, 0.95), transparent)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                opacity: 0,
-                transition: 'opacity 0.3s ease'
-              }}
-              className="card-overlay"
-              onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-              onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
-              >
-                <div style={{
-                  width: '54px',
-                  height: '54px',
-                  borderRadius: '50%',
-                  background: 'var(--primary)',
-                  color: '#000',
+              {/* Hover Overlay */}
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: 'linear-gradient(to top, rgba(13, 17, 23, 0.9) 0%, transparent 50%)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  boxShadow: '0 0 20px var(--primary)'
+                  opacity: 0,
+                  transition: 'opacity 0.25s ease'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
+              >
+                <div style={{
+                  width: '44px',
+                  height: '44px',
+                  borderRadius: '50%',
+                  background: 'var(--primary)',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
                 }}>
-                  <Play size={24} fill="#000" style={{ marginLeft: '4px' }} />
+                  <Play size={20} fill="#fff" style={{ marginLeft: '2px' }} />
                 </div>
               </div>
             </div>
 
-            {/* Title & Info */}
-            <div style={{ padding: '14px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+            {/* Title */}
+            <div style={{ padding: '10px 12px' }}>
               <h3 style={{
-                fontSize: '1rem',
-                fontWeight: 700,
+                fontSize: '0.9rem',
+                fontWeight: 600,
                 color: '#fff',
                 lineHeight: '1.3',
                 display: '-webkit-box',

@@ -1,0 +1,7 @@
+[submodule "AnimeSamaApi"]
+	path = AnimeSamaApi
+	url = https://github.com/TMCooper/AnimeSamaApi.git
+
+[submodule "voiranime_API"]
+	path = voiranime_API
+	url = https://github.com/TMCooper/voiranime_API.git

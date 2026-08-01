@@ -1,6 +1,6 @@
 import os
 import sys
-import threading
+import subprocess
 import time
 import asyncio
 from contextlib import asynccontextmanager
@@ -9,45 +9,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-# Ensure root dir & submodule dirs are in python path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANIME_SAMA_PATH = os.path.join(PROJECT_ROOT, "AnimeSamaApi")
 VOIRANIME_PATH = os.path.join(PROJECT_ROOT, "voiranime_API")
 
-for p in [PROJECT_ROOT, ANIME_SAMA_PATH, VOIRANIME_PATH]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-def start_anime_sama_api():
-    """Runs AnimeSama Flask API on http://127.0.0.1:5000"""
-    try:
-        from AnimeSamaApi.main import Api
-        print("[Nami] Starting AnimeSama API on http://127.0.0.1:5000 ...")
-        Api.launch(port=5000, ip="127.0.0.1", debug_state=False, reload_status=False)
-    except Exception as e:
-        print(f"[Nami] Error starting AnimeSama API: {e}")
-
-def start_voiranime_api():
-    """Runs VoirAnime FastAPI on http://127.0.0.1:8000"""
-    try:
-        import uvicorn
-        print("[Nami] Starting VoirAnime API on http://127.0.0.1:8000 ...")
-        uvicorn.run("voiranime_API.src.main:app", host="127.0.0.1", port=8000, reload=False, log_level="warning")
-    except Exception as e:
-        print(f"[Nami] Error starting VoirAnime API: {e}")
+procs = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Launch submodule APIs in background daemon threads
-    t_as = threading.Thread(target=start_anime_sama_api, daemon=True)
-    t_va = threading.Thread(target=start_voiranime_api, daemon=True)
-    
-    t_as.start()
-    t_va.start()
-    
-    # Allow 2 seconds for submodule APIs to bind to ports
+    # Launch AnimeSama API (Flask on http://127.0.0.1:5000)
+    try:
+        print("[Nami] Launching AnimeSama API (port 5000)...")
+        p_as = subprocess.Popen([sys.executable, "main.py"], cwd=ANIME_SAMA_PATH)
+        procs.append(p_as)
+    except Exception as e:
+        print(f"[Nami] Error launching AnimeSama API: {e}")
+
+    # Launch VoirAnime API (FastAPI on http://127.0.0.1:8000)
+    try:
+        print("[Nami] Launching VoirAnime API (port 8000)...")
+        p_va = subprocess.Popen([sys.executable, "main.py"], cwd=VOIRANIME_PATH)
+        procs.append(p_va)
+    except Exception as e:
+        print(f"[Nami] Error launching VoirAnime API: {e}")
+
+    # Give submodules 2 seconds to bind to ports
     await asyncio.sleep(2)
     yield
+
+    # Clean up subprocesses on shutdown
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
 
 app = FastAPI(
     title="Nami API & Server",
@@ -56,7 +51,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for local network and dev servers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

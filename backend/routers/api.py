@@ -85,7 +85,7 @@ async def update_catalog(source: str = Query("all", description="Source ('all', 
 
 @router.get("/catalog/status")
 async def get_catalog_status():
-    return catalog_service.get_update_status()
+    return await catalog_service.get_update_status()
 
 # --- Watch History & Progress Routes ---
 @router.get("/history")

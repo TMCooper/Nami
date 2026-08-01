@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY AnimeSamaApi /app/AnimeSamaApi
 COPY voiranime_API /app/voiranime_API
 COPY backend /app/backend
-COPY data /app/data
+RUN mkdir -p /app/data
 
 # Copy built frontend assets from builder stage
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist

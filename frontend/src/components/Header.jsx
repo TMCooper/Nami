@@ -33,7 +33,7 @@ export default function Header({
     };
 
     checkStatus();
-    const interval = setInterval(checkStatus, 3000);
+    const interval = setInterval(checkStatus, 10000);
     return () => clearInterval(interval);
   }, []);
 

@@ -11,7 +11,7 @@ VA_API_BASE = "http://127.0.0.1:8000"
 
 class CatalogService:
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=15.0)
+        self.client = httpx.AsyncClient(timeout=30.0)
         self._is_updating = False
         self._update_message = "Catalogue au repos"
 
@@ -114,7 +114,7 @@ class CatalogService:
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list):
-                        for item in data[:60]:
+                        for item in data[:500]:
                             title = item.get("title", "")
                             link = item.get("link", "")
                             if title and link:
@@ -167,7 +167,7 @@ class CatalogService:
                                 "cover": ""
                             })
                             count += 1
-                            if count >= 60:
+                            if count >= 500:
                                 break
         except Exception as e:
             print(f"[CatalogService] Error querying VoirAnime API (8000): {e}")

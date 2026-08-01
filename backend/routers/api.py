@@ -46,7 +46,7 @@ class MarkSeasonPayload(BaseModel):
 
 @router.get("/search")
 async def search_anime(
-    q: str = Query(..., description="Recherche d'anime"),
+    q: str = Query("", description="Recherche d'anime (vide = catalogue complet)"),
     source: str = Query("all", description="Source: 'all', 'anime_sama', 'voiranime'")
 ):
     results = await catalog_service.search(query=q, source=source)

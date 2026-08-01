@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
 import HistoryView from './components/HistoryView';
@@ -10,44 +10,45 @@ import SettingsModal from './components/SettingsModal';
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState('all');
-  const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' or 'history'
+  const [activeTab, setActiveTab] = useState('catalog');
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
   // Modals & Drawers
   const [selectedAnime, setSelectedAnime] = useState(null);
-  const [activePlayer, setActivePlayer] = useState(null); // { animeTitle, season, episode, episodes }
+  const [activePlayer, setActivePlayer] = useState(null);
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Downloads state
   const [downloads, setDownloads] = useState([]);
 
-  const handleSearch = () => {
-    if (!searchQuery.trim()) return;
+  // Load full catalog or search results
+  const loadCatalog = useCallback((query = '', source = 'all') => {
     setIsLoading(true);
-    setActiveTab('catalog');
+    const q = query.trim();
+    const url = q
+      ? `/api/search?q=${encodeURIComponent(q)}&source=${source}`
+      : `/api/search?q=&source=${source}`;
 
-    fetch(`/api/search?q=${encodeURIComponent(searchQuery.trim())}&source=${activeSource}`)
+    fetch(url)
       .then((res) => res.json())
       .then((data) => setResults(data.results || []))
-      .catch((err) => console.error("Search error:", err))
+      .catch((err) => console.error("Catalog load error:", err))
       .finally(() => setIsLoading(false));
+  }, []);
+
+  const handleSearch = () => {
+    setActiveTab('catalog');
+    loadCatalog(searchQuery, activeSource);
   };
 
+  // Reload catalog when source filter changes
   useEffect(() => {
-    if (searchQuery.trim()) {
-      handleSearch();
-    } else {
-      setIsLoading(true);
-      fetch(`/api/search?q=Frieren&source=${activeSource}`)
-        .then((res) => res.json())
-        .then((data) => setResults(data.results || []))
-        .catch((err) => console.error("Error fetching default anime:", err))
-        .finally(() => setIsLoading(false));
-    }
+    loadCatalog(searchQuery, activeSource);
   }, [activeSource]);
 
+  // Poll downloads every 10s (not 2s)
   useEffect(() => {
     const fetchDownloads = () => {
       fetch('/api/downloads')
@@ -57,7 +58,7 @@ export default function App() {
     };
 
     fetchDownloads();
-    const interval = setInterval(fetchDownloads, 2000);
+    const interval = setInterval(fetchDownloads, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -147,7 +148,6 @@ export default function App() {
         )}
       </main>
 
-      {/* Anime Detail Modal */}
       {selectedAnime && (
         <AnimeDetailModal
           anime={selectedAnime}
@@ -158,7 +158,6 @@ export default function App() {
         />
       )}
 
-      {/* Video Player Modal */}
       {activePlayer && (
         <VideoPlayerModal
           animeTitle={activePlayer.animeTitle}
@@ -173,7 +172,6 @@ export default function App() {
         />
       )}
 
-      {/* Download Manager Drawer */}
       <DownloadManagerDrawer
         isOpen={isDownloadsOpen}
         onClose={() => setIsDownloadsOpen(false)}
@@ -182,7 +180,6 @@ export default function App() {
         onClearCompleted={() => fetch('/api/downloads/clear', { method: 'POST' })}
       />
 
-      {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

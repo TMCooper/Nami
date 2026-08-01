@@ -1,27 +1,33 @@
 import os
 import sys
 import json
+import re
 import asyncio
 import httpx
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 AS_API_BASE = "http://127.0.0.1:5000"
 VA_API_BASE = "http://127.0.0.1:8000"
 
+
 class CatalogService:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=15.0)
+        self._is_updating = False
+        self._update_message = "Catalogue au repos"
 
     async def get_update_status(self) -> dict:
+        if self._is_updating:
+            return {"is_updating": True, "message": self._update_message, "source": "all"}
+
+        # Also check VoirAnime internal status
         try:
-            resp = await self.client.get(f"{VA_API_BASE}/catalog/status")
+            resp = await self.client.get(f"{VA_API_BASE}/catalog/status", timeout=3.0)
             if resp.status_code == 200:
                 va_status = resp.json()
                 if va_status.get("is_updating"):
                     return {
                         "is_updating": True,
-                        "message": f"Mise à jour VoirAnime (Page {va_status.get('current_page')})...",
+                        "message": f"Mise à jour VoirAnime (Page {va_status.get('current_page', '?')})...",
                         "source": "voiranime"
                     }
         except Exception:
@@ -29,29 +35,42 @@ class CatalogService:
         return {"is_updating": False, "message": "Catalogue au repos", "source": None}
 
     async def trigger_update(self, source: str = "all") -> dict:
-        tasks = []
-        if source in ["all", "anime_sama"]:
-            tasks.append(self._update_anime_sama())
-        if source in ["all", "voiranime"]:
-            tasks.append(self._update_voiranime())
+        if self._is_updating:
+            return {"is_updating": True, "message": self._update_message}
 
-        if tasks:
-            asyncio.create_task(asyncio.gather(*tasks, return_exceptions=True))
+        self._is_updating = True
+        self._update_message = "Mise à jour démarrée..."
+
+        # Launch background task
+        asyncio.create_task(self._run_update(source))
         return {"is_updating": True, "message": "Mise à jour du catalogue démarrée en arrière-plan."}
 
-    async def _update_anime_sama(self):
+    async def _run_update(self, source: str):
         try:
-            print("[CatalogService] Triggering AnimeSama catalog update via http://127.0.0.1:5000/api/getAllAnime?r=True")
-            await self.client.get(f"{AS_API_BASE}/api/getAllAnime?r=True", timeout=300.0)
-        except Exception as e:
-            print(f"[CatalogService] AnimeSama update error: {e}")
+            if source in ["all", "anime_sama"]:
+                self._update_message = "Mise à jour Anime-Sama en cours..."
+                try:
+                    print("[CatalogService] Triggering AnimeSama catalog update via http://127.0.0.1:5000/api/getAllAnime?r=True")
+                    await self.client.get(f"{AS_API_BASE}/api/getAllAnime?r=True", timeout=300.0)
+                    print("[CatalogService] AnimeSama catalog update complete.")
+                except Exception as e:
+                    print(f"[CatalogService] AnimeSama update error: {e}")
 
-    async def _update_voiranime(self):
-        try:
-            print("[CatalogService] Triggering VoirAnime catalog update via http://127.0.0.1:8000/catalog/update")
-            await self.client.get(f"{VA_API_BASE}/catalog/update", timeout=10.0)
+            if source in ["all", "voiranime"]:
+                self._update_message = "Mise à jour VoirAnime en cours..."
+                try:
+                    print("[CatalogService] Triggering VoirAnime catalog update via http://127.0.0.1:8000/catalog/update")
+                    await self.client.get(f"{VA_API_BASE}/catalog/update", timeout=300.0)
+                    print("[CatalogService] VoirAnime catalog update complete.")
+                except Exception as e:
+                    print(f"[CatalogService] VoirAnime update error: {e}")
+
+            self._update_message = "Catalogue à jour !"
         except Exception as e:
-            print(f"[CatalogService] VoirAnime update error: {e}")
+            self._update_message = f"Erreur: {e}"
+            print(f"[CatalogService] General update error: {e}")
+        finally:
+            self._is_updating = False
 
     async def search(self, query: str = "", source: str = "all") -> list:
         results = []
@@ -119,32 +138,37 @@ class CatalogService:
                 resp = await self.client.get(f"{VA_API_BASE}/anime/search", params={"query": q_clean})
                 if resp.status_code == 200:
                     data = resp.json()
-                    matches = data.get("results", [])
-                    for item in matches:
-                        results.append({
-                            "id": f"va:{item['url']}",
-                            "title": item["name"],
-                            "source": "voiranime",
-                            "url": item["url"],
-                            "cover": ""
-                        })
+                    matches = data.get("results", data) if isinstance(data, dict) else data
+                    if isinstance(matches, list):
+                        for item in matches:
+                            name = item.get("name", item.get("title", ""))
+                            url = item.get("url", "")
+                            if name and url:
+                                results.append({
+                                    "id": f"va:{url}",
+                                    "title": name,
+                                    "source": "voiranime",
+                                    "url": url,
+                                    "cover": ""
+                                })
             else:
                 resp = await self.client.get(f"{VA_API_BASE}/catalog")
                 if resp.status_code == 200:
                     data = resp.json()
-                    cat_dict = data.get("catalog", {})
+                    cat_dict = data.get("catalog", data) if isinstance(data, dict) else {}
                     count = 0
-                    for name, url in cat_dict.items():
-                        results.append({
-                            "id": f"va:{url}",
-                            "title": name,
-                            "source": "voiranime",
-                            "url": url,
-                            "cover": ""
-                        })
-                        count += 1
-                        if count >= 60:
-                            break
+                    if isinstance(cat_dict, dict):
+                        for name, url in cat_dict.items():
+                            results.append({
+                                "id": f"va:{url}",
+                                "title": name,
+                                "source": "voiranime",
+                                "url": url,
+                                "cover": ""
+                            })
+                            count += 1
+                            if count >= 60:
+                                break
         except Exception as e:
             print(f"[CatalogService] Error querying VoirAnime API (8000): {e}")
 
@@ -159,7 +183,6 @@ class CatalogService:
 
     async def _get_details_anime_sama(self, url: str) -> dict:
         try:
-            # Query AnimeSama API getInfoAnime
             title = url.rstrip("/").split("/")[-1].replace("-", " ")
             resp = await self.client.get(f"{AS_API_BASE}/api/getInfoAnime", params={"q": title})
             if resp.status_code == 200:
@@ -181,7 +204,7 @@ class CatalogService:
                         "seasons": seasons
                     }
         except Exception as e:
-            print(f"[CatalogService] Error fetching AnimeSama details via 5000: {e}")
+            print(f"[CatalogService] Error fetching AnimeSama details: {e}")
 
         return {"title": url.rstrip("/").split("/")[-1], "source": "anime_sama", "seasons": [{"name": "Saison 1", "url": url}]}
 
@@ -200,52 +223,48 @@ class CatalogService:
                     "episodes": episodes
                 }
         except Exception as e:
-            print(f"[CatalogService] Error fetching VoirAnime details via 8000: {e}")
+            print(f"[CatalogService] Error fetching VoirAnime details: {e}")
 
         return {"title": "Anime", "source": "voiranime", "episodes": []}
 
     async def fetch_anime_sama_episodes(self, season_url: str) -> list:
         episodes = []
         try:
-            import cloudscraper
-            from bs4 import BeautifulSoup
-            scraper = cloudscraper.create_scraper()
-            resp = await asyncio.to_thread(scraper.get, season_url, timeout=10)
+            resp = await self.client.get(f"{AS_API_BASE}/api/getAnimeLink", params={"q": season_url}, timeout=30.0)
             if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                scripts = soup.find_all("script")
-                for script in scripts:
-                    if script.string and "var eps" in script.string:
-                        matches = re.findall(r'var\s+eps\d*\s*=\s*\[(.*?)\];', script.string, re.DOTALL)
-                        for m in matches:
-                            links = [l.strip('"\' ') for l in m.split(',') if l.strip('"\' ')]
-                            for idx, link in enumerate(links, 1):
-                                episodes.append({
-                                    "num": idx,
-                                    "title": f"Épisode {idx}",
-                                    "embed_url": link
-                                })
-                        break
+                data = resp.json()
+                if isinstance(data, list):
+                    for idx, item in enumerate(data, 1):
+                        embed_url = item.get("url", item.get("link", ""))
+                        if embed_url:
+                            episodes.append({
+                                "num": idx,
+                                "title": f"Épisode {idx}",
+                                "embed_url": embed_url
+                            })
         except Exception as e:
             print(f"[CatalogService] Error fetching AS season episodes: {e}")
         return episodes
 
     async def resolve_stream(self, embed_url: str, source: str = "anime_sama") -> dict:
+        result = {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
+
+        if embed_url.startswith("//"):
+            embed_url = "https:" + embed_url
+
         try:
-            # Try VoirAnime resolver API (port 8000)
             resp = await self.client.get(f"{VA_API_BASE}/resolve", params={"embed_url": embed_url})
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "success" and data.get("stream_url"):
-                    return {
-                        "stream_url": data["stream_url"],
-                        "stream_type": data.get("stream_type", "m3u8"),
-                        "iframe_url": embed_url,
-                        "host": data.get("host")
-                    }
+                    result["stream_url"] = data["stream_url"]
+                    result["stream_type"] = data.get("stream_type", "m3u8")
+                    result["host"] = data.get("host")
+                    return result
         except Exception:
             pass
 
-        return {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
+        return result
+
 
 catalog_service = CatalogService()

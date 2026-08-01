@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Download, Settings, RefreshCw, Layers, Tv, Film, History, Bookmark } from 'lucide-react';
+import { Search, Download, Settings, RefreshCw, Layers, History } from 'lucide-react';
 
 export default function Header({ 
   searchQuery, 
@@ -64,66 +64,57 @@ export default function Header({
     }}>
       {/* Top Row: Logo, Search, Controls */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
-        {/* Logo */}
+        {/* Sober Minimalist Logo */}
         <div 
-          style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+          style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
           onClick={() => {
             setSearchQuery('');
             setActiveTab('catalog');
           }}
         >
-          <div style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: 'var(--radius-sm)',
-            background: 'var(--primary)',
-            color: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+          <span style={{
+            fontSize: '1.25rem',
             fontWeight: 800,
-            fontSize: '1.2rem'
+            letterSpacing: '1px',
+            color: '#F0F6FC'
           }}>
-            N
-          </div>
-          <span style={{ fontSize: '1.3rem', fontWeight: 800, letterSpacing: '-0.5px' }}>
-            NAMI <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 500 }}>.anime</span>
+            NAMI
           </span>
         </div>
 
         {/* Search Bar */}
-        <div style={{ position: 'relative', flex: 1, maxWidth: '500px' }}>
-          <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+        <div style={{ position: 'relative', flex: 1, maxWidth: '480px' }}>
+          <Search size={15} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
           <input
             type="text"
-            placeholder="Rechercher un anime (ex: Frieren, Naruto, Solo Leveling)..."
+            placeholder="Rechercher un anime (ex: Frieren, Solo Leveling)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             style={{
               width: '100%',
-              padding: '8px 14px 8px 36px',
+              padding: '7px 14px 7px 34px',
               background: '#0D1117',
               border: '1px solid var(--border-color)',
               borderRadius: 'var(--radius-sm)',
               color: '#fff',
-              fontSize: '0.88rem',
+              fontSize: '0.85rem',
               outline: 'none'
             }}
           />
         </div>
 
         {/* Top Right Actions */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           {/* Refresh Catalog Button */}
           <button
-            className={`btn ${isRefreshing ? 'btn-secondary' : 'btn-secondary'}`}
+            className="btn btn-secondary"
             onClick={handleRefreshCatalog}
             disabled={isRefreshing}
-            style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+            style={{ fontSize: '0.78rem', padding: '6px 12px' }}
             title="Actualiser la base de données d'animes"
           >
-            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
             <span>{isRefreshing ? 'Actualisation...' : 'Actualiser DB'}</span>
           </button>
 
@@ -131,17 +122,17 @@ export default function Header({
           <button
             className="btn btn-secondary"
             onClick={onOpenDownloads}
-            style={{ position: 'relative', fontSize: '0.8rem', padding: '6px 12px' }}
+            style={{ position: 'relative', fontSize: '0.78rem', padding: '6px 12px' }}
           >
-            <Download size={14} />
+            <Download size={13} />
             <span>Téléchargements</span>
             {activeDownloadsCount > 0 && (
               <span style={{
                 background: 'var(--primary)',
                 color: '#fff',
-                fontSize: '0.7rem',
+                fontSize: '0.68rem',
                 fontWeight: 800,
-                padding: '1px 6px',
+                padding: '1px 5px',
                 borderRadius: 'var(--radius-full)',
                 marginLeft: '4px'
               }}>
@@ -151,8 +142,8 @@ export default function Header({
           </button>
 
           {/* Settings Button */}
-          <button className="btn btn-icon btn-secondary" onClick={onOpenSettings} title="Paramètres">
-            <Settings size={16} />
+          <button className="btn btn-icon btn-secondary" onClick={onOpenSettings} title="Paramètres" style={{ width: '32px', height: '32px' }}>
+            <Settings size={14} />
           </button>
         </div>
       </div>
@@ -163,27 +154,27 @@ export default function Header({
         <div style={{ display: 'flex', gap: '6px' }}>
           <button
             className={`btn ${activeTab === 'catalog' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '6px 14px', fontSize: '0.82rem' }}
+            style={{ padding: '5px 12px', fontSize: '0.8rem' }}
             onClick={() => setActiveTab('catalog')}
           >
-            <Layers size={14} /> Catalogue
+            <Layers size={13} /> Catalogue
           </button>
 
           <button
             className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '6px 14px', fontSize: '0.82rem' }}
+            style={{ padding: '5px 12px', fontSize: '0.8rem' }}
             onClick={() => setActiveTab('history')}
           >
-            <History size={14} /> Historique & Reprise
+            <History size={13} /> Historique & Reprise
           </button>
         </div>
 
         {/* Source Pills */}
-        <div style={{ display: 'flex', gap: '4px', background: '#0D1117', padding: '2px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+        <div style={{ display: 'flex', gap: '2px', background: '#0D1117', padding: '2px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
           <button
             style={{
-              padding: '4px 10px',
-              fontSize: '0.75rem',
+              padding: '3px 9px',
+              fontSize: '0.73rem',
               fontWeight: 600,
               borderRadius: 'var(--radius-sm)',
               border: 'none',
@@ -197,8 +188,8 @@ export default function Header({
           </button>
           <button
             style={{
-              padding: '4px 10px',
-              fontSize: '0.75rem',
+              padding: '3px 9px',
+              fontSize: '0.73rem',
               fontWeight: 600,
               borderRadius: 'var(--radius-sm)',
               border: 'none',
@@ -212,8 +203,8 @@ export default function Header({
           </button>
           <button
             style={{
-              padding: '4px 10px',
-              fontSize: '0.75rem',
+              padding: '3px 9px',
+              fontSize: '0.73rem',
               fontWeight: 600,
               borderRadius: 'var(--radius-sm)',
               border: 'none',

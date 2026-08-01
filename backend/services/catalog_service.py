@@ -1,90 +1,57 @@
 import os
 import sys
 import json
-import re
 import asyncio
+import httpx
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ANIME_SAMA_PATH = os.path.join(PROJECT_ROOT, "AnimeSamaApi")
-VOIRANIME_PATH = os.path.join(PROJECT_ROOT, "voiranime_API")
 
-if ANIME_SAMA_PATH not in sys.path:
-    sys.path.insert(0, ANIME_SAMA_PATH)
-if VOIRANIME_PATH not in sys.path:
-    sys.path.insert(0, VOIRANIME_PATH)
-
-try:
-    from AnimeSamaApi.src.backend import Cardinal
-    from AnimeSamaApi.src.utils.resolvers import resolve_video_url as as_resolve_url
-except ImportError:
-    try:
-        from src.backend import Cardinal
-        from src.utils.resolvers import resolve_video_url as as_resolve_url
-    except ImportError:
-        Cardinal = None
-        as_resolve_url = None
-
-try:
-    from voiranime_API.src.core.scraper import VoirAnimeScraper
-except ImportError:
-    try:
-        from src.core.scraper import VoirAnimeScraper
-    except ImportError:
-        VoirAnimeScraper = None
-
+AS_API_BASE = "http://127.0.0.1:5000"
+VA_API_BASE = "http://127.0.0.1:8000"
 
 class CatalogService:
     def __init__(self):
-        self.data_dir = os.path.join(PROJECT_ROOT, "data")
-        os.makedirs(self.data_dir, exist_ok=True)
-        
-        # Initialize VoirAnime Scraper targeting data directory
-        self.va_scraper = VoirAnimeScraper(data_dir=os.path.join(self.data_dir, "voiranime")) if VoirAnimeScraper else None
+        self.client = httpx.AsyncClient(timeout=15.0)
 
-        self.update_status = {
-            "is_updating": False,
-            "message": "Catalogue au repos",
-            "source": None,
-            "progress": 0
-        }
-
-    def get_update_status(self) -> dict:
-        if self.va_scraper and getattr(self.va_scraper, 'update_status', {}).get("is_updating"):
-            return {
-                "is_updating": True,
-                "message": f"Mise à jour VoirAnime (Page {self.va_scraper.update_status.get('current_page')})...",
-                "source": "voiranime",
-                "total_animes": self.va_scraper.update_status.get("total_animes", 0)
-            }
-        return self.update_status
-
-    async def trigger_update(self, source: str = "all"):
-        if self.update_status["is_updating"]:
-            return self.update_status
-
-        self.update_status["is_updating"] = True
-        self.update_status["message"] = "Mise à jour démarrée..."
-        self.update_status["source"] = source
-
-        asyncio.create_task(self._run_catalog_update(source))
-        return self.update_status
-
-    async def _run_catalog_update(self, source: str):
+    async def get_update_status(self) -> dict:
         try:
-            if source in ["all", "voiranime"] and self.va_scraper:
-                self.update_status["message"] = "Mise à jour VoirAnime en cours..."
-                await self.va_scraper.update_catalog(max_pages=50)
+            resp = await self.client.get(f"{VA_API_BASE}/catalog/status")
+            if resp.status_code == 200:
+                va_status = resp.json()
+                if va_status.get("is_updating"):
+                    return {
+                        "is_updating": True,
+                        "message": f"Mise à jour VoirAnime (Page {va_status.get('current_page')})...",
+                        "source": "voiranime"
+                    }
+        except Exception:
+            pass
+        return {"is_updating": False, "message": "Catalogue au repos", "source": None}
 
-            if source in ["all", "anime_sama"] and Cardinal:
-                self.update_status["message"] = "Mise à jour Anime-Sama en cours..."
-                await asyncio.to_thread(Cardinal.getAllAnime, reset="True")
+    async def trigger_update(self, source: str = "all") -> dict:
+        tasks = []
+        if source in ["all", "anime_sama"]:
+            tasks.append(self._update_anime_sama())
+        if source in ["all", "voiranime"]:
+            tasks.append(self._update_voiranime())
 
-            self.update_status["message"] = "Catalogue à jour !"
+        if tasks:
+            asyncio.create_task(asyncio.gather(*tasks, return_exceptions=True))
+        return {"is_updating": True, "message": "Mise à jour du catalogue démarrée en arrière-plan."}
+
+    async def _update_anime_sama(self):
+        try:
+            print("[CatalogService] Triggering AnimeSama catalog update via http://127.0.0.1:5000/api/getAllAnime?r=True")
+            await self.client.get(f"{AS_API_BASE}/api/getAllAnime?r=True", timeout=300.0)
         except Exception as e:
-            print(f"[CatalogService] Error updating catalog: {e}")
-            self.update_status["message"] = f"Erreur: {str(e)}"
-        finally:
-            self.update_status["is_updating"] = False
+            print(f"[CatalogService] AnimeSama update error: {e}")
+
+    async def _update_voiranime(self):
+        try:
+            print("[CatalogService] Triggering VoirAnime catalog update via http://127.0.0.1:8000/catalog/update")
+            await self.client.get(f"{VA_API_BASE}/catalog/update", timeout=10.0)
+        except Exception as e:
+            print(f"[CatalogService] VoirAnime update error: {e}")
 
     async def search(self, query: str = "", source: str = "all") -> list:
         results = []
@@ -105,74 +72,81 @@ class CatalogService:
 
     async def _search_anime_sama(self, query: str = "") -> list:
         results = []
-        if not Cardinal:
-            return results
-
+        q_clean = query.strip()
         try:
-            # Use Cardinal submodule to load base data directly from local JSON file
-            raw_data = await asyncio.to_thread(Cardinal.loadBaseAnimeData)
-            
-            if isinstance(raw_data, str) or not raw_data:
-                return results
-
-            q_clean = query.lower().strip()
-
-            for item in raw_data:
-                title = item.get("title", "")
-                link = item.get("link", "")
-                if not title or not link:
-                    continue
-
-                if not q_clean or q_clean in title.lower():
-                    results.append({
-                        "id": f"as:{link}",
-                        "title": title,
-                        "source": "anime_sama",
-                        "url": link,
-                        "cover": ""
-                    })
-
-                if len(results) >= 60 and not q_clean:
-                    break
+            if q_clean:
+                resp = await self.client.get(f"{AS_API_BASE}/api/getSerchAnime", params={"q": q_clean})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        for item in data:
+                            title = item.get("title", "")
+                            link = item.get("lien", item.get("link", ""))
+                            if title and link:
+                                results.append({
+                                    "id": f"as:{link}",
+                                    "title": title,
+                                    "source": "anime_sama",
+                                    "url": link,
+                                    "cover": ""
+                                })
+            else:
+                resp = await self.client.get(f"{AS_API_BASE}/api/loadBaseAnimeData")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        for item in data[:60]:
+                            title = item.get("title", "")
+                            link = item.get("link", "")
+                            if title and link:
+                                results.append({
+                                    "id": f"as:{link}",
+                                    "title": title,
+                                    "source": "anime_sama",
+                                    "url": link,
+                                    "cover": ""
+                                })
         except Exception as e:
-            print(f"[CatalogService] Error loading AnimeSama data: {e}")
+            print(f"[CatalogService] Error querying AnimeSama API (5000): {e}")
 
         return results
 
     async def _search_voiranime(self, query: str = "") -> list:
         results = []
-        if not self.va_scraper:
-            return results
-
+        q_clean = query.strip()
         try:
-            q_clean = query.lower().strip()
-            
             if q_clean:
-                matches = self.va_scraper.resolve_anime(q_clean)
-                for item in matches:
-                    results.append({
-                        "id": f"va:{item['url']}",
-                        "title": item["name"],
-                        "source": "voiranime",
-                        "url": item["url"],
-                        "cover": ""
-                    })
+                resp = await self.client.get(f"{VA_API_BASE}/anime/search", params={"query": q_clean})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    matches = data.get("results", [])
+                    for item in matches:
+                        results.append({
+                            "id": f"va:{item['url']}",
+                            "title": item["name"],
+                            "source": "voiranime",
+                            "url": item["url"],
+                            "cover": ""
+                        })
             else:
-                catalog_dict = self.va_scraper.load_catalog()
-                count = 0
-                for name, url in catalog_dict.items():
-                    results.append({
-                        "id": f"va:{url}",
-                        "title": name,
-                        "source": "voiranime",
-                        "url": url,
-                        "cover": ""
-                    })
-                    count += 1
-                    if count >= 60:
-                        break
+                resp = await self.client.get(f"{VA_API_BASE}/catalog")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    cat_dict = data.get("catalog", {})
+                    count = 0
+                    for name, url in cat_dict.items():
+                        results.append({
+                            "id": f"va:{url}",
+                            "title": name,
+                            "source": "voiranime",
+                            "url": url,
+                            "cover": ""
+                        })
+                        count += 1
+                        if count >= 60:
+                            break
         except Exception as e:
-            print(f"[CatalogService] Error loading VoirAnime data: {e}")
+            print(f"[CatalogService] Error querying VoirAnime API (8000): {e}")
 
         return results
 
@@ -184,96 +158,62 @@ class CatalogService:
         return {}
 
     async def _get_details_anime_sama(self, url: str) -> dict:
-        import cloudscraper
-        scraper = cloudscraper.create_scraper()
         try:
-            resp = await asyncio.to_thread(scraper.get, url, timeout=10)
-            if resp.status_code != 200:
-                return {}
-
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            title_tag = soup.find('h1') or soup.find('h2', class_="card-title")
-            title = title_tag.get_text(strip=True) if title_tag else "Anime"
-
-            img_tag = soup.find('img', id="cover") or soup.find('img', class_="w-full")
-            cover = img_tag.get('src') if img_tag else ""
-
-            desc_tag = soup.find('p', class_="text-sm text-gray-400") or soup.find('div', id="synopsis")
-            synopsis = desc_tag.get_text(strip=True) if desc_tag else ""
-
-            scripts = soup.find_all("script")
-            pattern = re.compile(r'panneau(?:Anime|Film|Scan|Visual)\s*\(\s*(["\'])(.*?)\1\s*,\s*(["\'])(.*?)\3\s*\)')
-
-            seasons = []
-            for script in scripts:
-                if script.text:
-                    text = re.sub(r'/\*.*?\*/', '', script.text, flags=re.DOTALL)
-                    matches = pattern.findall(text)
-                    for quote1, nom, quote2, lien in matches:
-                        if nom.lower() not in ["nom", "scan", "visual"] and lien.lower() != "url":
-                            saison_url = url.rstrip("/") + "/" + lien.lstrip("/")
-                            seasons.append({
-                                "name": nom,
-                                "url": saison_url,
-                                "raw_link": lien
-                            })
-
-            return {
-                "title": title,
-                "cover": cover,
-                "synopsis": synopsis,
-                "source": "anime_sama",
-                "seasons": seasons
-            }
+            # Query AnimeSama API getInfoAnime
+            title = url.rstrip("/").split("/")[-1].replace("-", " ")
+            resp = await self.client.get(f"{AS_API_BASE}/api/getInfoAnime", params={"q": title})
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    anime_name = data[0].get("title", title)
+                    seasons = []
+                    for item in data:
+                        seasons.append({
+                            "name": item.get("Saison", "Saison 1"),
+                            "url": item.get("url", url),
+                            "raw_link": item.get("url", url)
+                        })
+                    return {
+                        "title": anime_name,
+                        "cover": "",
+                        "synopsis": "",
+                        "source": "anime_sama",
+                        "seasons": seasons
+                    }
         except Exception as e:
-            print(f"[CatalogService] Error AnimeSama details: {e}")
-            return {}
+            print(f"[CatalogService] Error fetching AnimeSama details via 5000: {e}")
+
+        return {"title": url.rstrip("/").split("/")[-1], "source": "anime_sama", "seasons": [{"name": "Saison 1", "url": url}]}
 
     async def _get_details_voiranime(self, url: str) -> dict:
         try:
-            if not self.va_scraper:
-                return {}
-            episodes = await self.va_scraper.fetch_episodes(url)
-            
-            cover = ""
-            synopsis = ""
-            title = "Anime"
-            
-            self.va_scraper.init_client()
-            resp = await self.va_scraper.client.get(url)
+            resp = await self.client.get(f"{VA_API_BASE}/episodes", params={"anime_url": url})
             if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'lxml')
-                t_tag = soup.find('h1') or soup.find('div', class_="post-title")
-                if t_tag:
-                    title = t_tag.get_text(strip=True)
-                img = soup.find('div', class_="summary_image")
-                if img and img.find('img'):
-                    cover = img.find('img').get('src', '')
-                desc = soup.find('div', class_="description-summary") or soup.find('div', class_="summary__content")
-                if desc:
-                    synopsis = desc.get_text(strip=True)
-
-            return {
-                "title": title,
-                "cover": cover,
-                "synopsis": synopsis,
-                "source": "voiranime",
-                "episodes": episodes
-            }
+                data = resp.json()
+                episodes = data.get("episodes", [])
+                title = url.rstrip("/").split("/")[-1].replace("-", " ").title()
+                return {
+                    "title": title,
+                    "cover": "",
+                    "synopsis": "",
+                    "source": "voiranime",
+                    "episodes": episodes
+                }
         except Exception as e:
-            print(f"[CatalogService] Error VoirAnime details: {e}")
-            return {}
+            print(f"[CatalogService] Error fetching VoirAnime details via 8000: {e}")
+
+        return {"title": "Anime", "source": "voiranime", "episodes": []}
 
     async def fetch_anime_sama_episodes(self, season_url: str) -> list:
-        import cloudscraper
-        scraper = cloudscraper.create_scraper()
         episodes = []
         try:
+            import cloudscraper
+            from bs4 import BeautifulSoup
+            scraper = cloudscraper.create_scraper()
             resp = await asyncio.to_thread(scraper.get, season_url, timeout=10)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 scripts = soup.find_all("script")
-                
                 for script in scripts:
                     if script.string and "var eps" in script.string:
                         matches = re.findall(r'var\s+eps\d*\s*=\s*\[(.*?)\];', script.string, re.DOTALL)
@@ -286,45 +226,26 @@ class CatalogService:
                                     "embed_url": link
                                 })
                         break
-
-                if not episodes:
-                    iframes = soup.find_all('iframe')
-                    for idx, iframe in enumerate(iframes, 1):
-                        src = iframe.get('src')
-                        if src:
-                            episodes.append({
-                                "num": idx,
-                                "title": f"Épisode {idx}",
-                                "embed_url": src
-                            })
         except Exception as e:
             print(f"[CatalogService] Error fetching AS season episodes: {e}")
         return episodes
 
     async def resolve_stream(self, embed_url: str, source: str = "anime_sama") -> dict:
-        result = {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
-        
-        if embed_url.startswith("//"):
-            embed_url = "https:" + embed_url
-
         try:
-            if as_resolve_url:
-                as_res = await asyncio.to_thread(as_resolve_url, embed_url)
-                if as_res and as_res.get("url") and as_res.get("type") in ["m3u8", "mp4"]:
-                    result["stream_url"] = as_res["url"]
-                    result["stream_type"] = as_res["type"]
-                    return result
+            # Try VoirAnime resolver API (port 8000)
+            resp = await self.client.get(f"{VA_API_BASE}/resolve", params={"embed_url": embed_url})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success" and data.get("stream_url"):
+                    return {
+                        "stream_url": data["stream_url"],
+                        "stream_type": data.get("stream_type", "m3u8"),
+                        "iframe_url": embed_url,
+                        "host": data.get("host")
+                    }
+        except Exception:
+            pass
 
-            if self.va_scraper and hasattr(self.va_scraper, 'resolver'):
-                va_res = await self.va_scraper.resolver.resolve(embed_url)
-                if va_res and va_res.get("status") == "success" and va_res.get("stream_url"):
-                    result["stream_url"] = va_res["stream_url"]
-                    result["stream_type"] = va_res.get("stream_type", "m3u8")
-                    result["host"] = va_res.get("host")
-                    return result
-        except Exception as e:
-            print(f"[CatalogService] Error resolving stream URL ({embed_url}): {e}")
-
-        return result
+        return {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
 
 catalog_service = CatalogService()

@@ -5,6 +5,7 @@ import base64
 import mimetypes
 import hashlib
 import subprocess
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response, FileResponse
 from pydantic import BaseModel
@@ -17,6 +18,7 @@ from backend.services.download_service import download_service, sanitize_filenam
 from backend.services.history_service import history_service
 from backend.services.user_service import user_service
 from backend.services.cache_service import cache_service
+from backend.services.yoitsu_service import yoitsu_service
 
 router = APIRouter(prefix="/api", tags=["Nami API"])
 
@@ -143,6 +145,13 @@ async def update_profile(x_user_id: Optional[str] = Header("default"), avatar: O
 
     return user_service.get_user(uid)
 
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: str):
+    success = user_service.delete_user(user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
+    return {"status": "ok", "message": f"Utilisateur {user_id} et toutes ses données supprimés."}
+
 @router.get("/users/stats")
 async def get_user_stats(x_user_id: Optional[str] = Header("default")):
     stats = history_service.get_user_stats(user_id=x_user_id or "default")
@@ -201,6 +210,40 @@ async def get_season_episodes(
     version: Optional[str] = Query("vostfr", description="Version (vostfr ou vf)"),
     refresh: bool = Query(False, description="Forcer l'invalidation du cache")
 ):
+    # Check if this is a manga scans request via YoitsuWrap
+    if (season_name and season_name.lower() == "scans") or ("scans" in season_url.lower()):
+        manga_name = anime_title or season_url.rstrip("/").split("/")[-1].replace("-", " ")
+        chapters = yoitsu_service.get_chapters_summary(manga_name)
+        local_status = yoitsu_service.get_downloaded_chapters_status(manga_name)
+
+        episodes = []
+        for ch in chapters:
+            c_num_str = str(ch["chapter_num"])
+            is_local = c_num_str in local_status
+            pages = ch["pages"]
+
+            if is_local:
+                local_dir = local_status[c_num_str]["path"]
+                try:
+                    img_files = sorted(
+                        [f for f in os.listdir(local_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))],
+                        key=lambda x: [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', x)]
+                    )
+                    if img_files:
+                        pages = [os.path.join(local_dir, f).replace("\\", "/") for f in img_files]
+                except Exception:
+                    pass
+
+            episodes.append({
+                "num": ch["chapter_num"],
+                "title": ch["title"],
+                "pages_count": len(pages),
+                "pages": pages,
+                "is_scan": True,
+                "is_downloaded": is_local
+            })
+        return {"total": len(episodes), "episodes": episodes, "is_scans": True}
+
     if "voir-anime" in season_url:
         va_details = await catalog_service.get_details(url=season_url, source="voiranime", refresh=refresh)
         episodes = va_details.get("episodes", [])
@@ -212,7 +255,62 @@ async def get_season_episodes(
             version=version or "vostfr",
             refresh=refresh
         )
-    return {"total": len(episodes), "episodes": episodes}
+    return {"total": len(episodes), "episodes": episodes, "is_scans": False}
+
+class DownloadScanPayload(BaseModel):
+    anime_title: str
+    chapter_num: Optional[int] = None
+
+@router.get("/scans")
+async def get_scans_list(anime_title: str = Query(...)):
+    chapters = yoitsu_service.get_chapters_summary(anime_title)
+    return {"title": anime_title, "total": len(chapters), "chapters": chapters}
+
+@router.post("/scans/download")
+async def download_scan_endpoint(payload: DownloadScanPayload):
+    try:
+        if payload.chapter_num is not None:
+            res = await yoitsu_service.download_chapter(payload.anime_title, payload.chapter_num)
+        else:
+            res = await yoitsu_service.download_all_scans(payload.anime_title)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/scans/status")
+async def get_scans_status(anime_title: str = Query(...)):
+    """Checks disk for downloaded chapters of a manga."""
+    status_dict = yoitsu_service.get_downloaded_chapters_status(anime_title)
+    return {"anime_title": anime_title, "downloaded_chapters": status_dict}
+
+@router.get("/proxy/image")
+async def proxy_image(url: str = Query(...)):
+    """Proxies manga scan images with necessary referrer headers to bypass anti-hotlinking."""
+    decoded_url = unquote(url).strip()
+    if not decoded_url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid image URL")
+
+    referer = "https://anime-sama.to/"
+    if "voir-anime" in decoded_url or "voiranime" in decoded_url:
+        referer = "https://voir-anime.to/"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": referer,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(decoded_url, headers=headers)
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            if resp.status_code == 200 and not resp.content.startswith(b"<!DOCTYPE") and not resp.content.startswith(b"<html"):
+                return Response(content=resp.content, media_type=content_type, headers={
+                    "Cache-Control": "public, max-age=86400"
+                })
+            raise HTTPException(status_code=resp.status_code, detail="Invalid image content or blocked")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error proxying image: {e}")
 
 @router.get("/resolve")
 async def resolve_stream(
@@ -356,13 +454,16 @@ async def get_downloaded_library():
     return {"total_animes": len(lib), "library": lib}
 
 @router.delete("/library/episode")
-async def delete_downloaded_episode(file_path: str = Query(..., description="Chemin absolu du fichier épisode")):
-    """Delete a single downloaded episode file from disk. Stats/history are preserved."""
+async def delete_downloaded_episode(file_path: str = Query(..., description="Chemin absolu du fichier épisode ou dossier de chapitre")):
+    """Delete a single downloaded episode file or chapter scan folder from disk."""
     decoded_path = unquote(file_path).strip()
-    if not os.path.exists(decoded_path) or not os.path.isfile(decoded_path):
-        raise HTTPException(status_code=404, detail="Fichier introuvable sur le disque.")
+    if not os.path.exists(decoded_path):
+        raise HTTPException(status_code=404, detail="Fichier ou dossier introuvable sur le disque.")
     try:
-        os.remove(decoded_path)
+        if os.path.isdir(decoded_path):
+            shutil.rmtree(decoded_path)
+        else:
+            os.remove(decoded_path)
         # Clean up empty parent directories
         parent = os.path.dirname(decoded_path)
         if os.path.isdir(parent) and not os.listdir(parent):
@@ -381,14 +482,19 @@ async def delete_downloaded_anime(
     """Delete an entire anime folder from disk. Stats/history are preserved."""
     root_folder = settings_service.get_root_folder()
     safe_title = sanitize_filename(anime_title)
-    anime_dir = os.path.join(root_folder, "nami", "anime", safe_title)
+    
+    deleted = False
+    for sub in ["anime", "Anime"]:
+        anime_dir = os.path.join(root_folder, "nami", sub, safe_title)
+        if os.path.exists(anime_dir) and os.path.isdir(anime_dir):
+            try:
+                shutil.rmtree(anime_dir)
+                deleted = True
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
 
-    if not os.path.exists(anime_dir) or not os.path.isdir(anime_dir):
+    if not deleted:
         raise HTTPException(status_code=404, detail="Dossier anime introuvable sur le disque.")
-    try:
-        shutil.rmtree(anime_dir)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
     return {"status": "deleted", "anime_title": anime_title}
 
 # --- Watch History & Progress Routes ---

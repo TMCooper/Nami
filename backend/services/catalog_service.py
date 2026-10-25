@@ -19,6 +19,44 @@ HEADERS = {
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
+CANONICAL_ALIASES = {
+    "spice and wolf": "ookami to koushinryou",
+    "spice & wolf": "ookami to koushinryou",
+    "ookami to koushinryou": "spice and wolf",
+    "ookami to koushinryu": "spice and wolf",
+    "attack on titan": "shingeki no kyojin",
+    "lattaque des titans": "shingeki no kyojin",
+    "l'attaque des titans": "shingeki no kyojin",
+    "shingeki no kyojin": "attack on titan",
+    "frieren": "sousou no frieren",
+    "frieren: beyond journey's end": "sousou no frieren",
+    "sousou no frieren": "frieren",
+    "redo of healer": "kaifuku jutsushi no yarinaoshi",
+    "kaifuku jutsushi no yarinaoshi": "redo of healer",
+    "high school dxd": "high school dxd",
+    "high school dxd new": "high school dxd",
+    "high school dxd born": "high school dxd",
+    "high school dxd hero": "high school dxd",
+}
+
+def get_canonical_search_queries(q: str) -> List[str]:
+    q_clean = q.strip().lower()
+    queries = [q.strip()]
+    if q_clean in CANONICAL_ALIASES:
+        queries.append(CANONICAL_ALIASES[q_clean])
+    simple = re.sub(r'[^a-zA-Z0-9\s]', '', q_clean).strip()
+    if simple in CANONICAL_ALIASES and CANONICAL_ALIASES[simple] not in queries:
+        queries.append(CANONICAL_ALIASES[simple])
+    return queries
+
+def get_base_anime_title(title: str) -> str:
+    """Extracts base anime title by stripping season numbers, year reboots, and VF/VOSTFR tags."""
+    t = re.sub(r'\s*\((?:VF|VOSTFR|\d{4})\)\s*', '', title, flags=re.IGNORECASE)
+    t = re.sub(r'\s+(?:VF|VOSTFR)$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s+(?:II|III|IV|V|\d+(?:st|nd|rd|th)?\s*Season|Season\s*\d+|The Final Season|Specials?|OAV|OVA)\s*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s+\d{4}$', '', t)
+    return t.strip()
+
 
 class CatalogService:
     def __init__(self):
@@ -78,7 +116,9 @@ class CatalogService:
     def _format_cover_url(self, cover: str) -> str:
         if not cover:
             return ""
-        if "voir-anime" in cover:
+        if cover.startswith("/api/proxy/image"):
+            return cover
+        if "voir-anime" in cover or "voiranime" in cover:
             return f"/api/proxy/image?url={quote(cover, safe='')}"
         return cover
 
@@ -126,8 +166,26 @@ class CatalogService:
         cov = self._get_voiranime_cached_cover(name)
         if cov:
             return cov
+        base_name = get_base_anime_title(name)
+        if base_name and base_name != name:
+            cov = self._get_voiranime_cached_cover(base_name)
+            if cov:
+                return cov
 
-        # 2. Check if detail cache has it
+        # 2. Check YoitsuWrap source API
+        try:
+            from backend.services.yoitsu_service import yoitsu_service
+            yoitsu_cov = yoitsu_service.get_anime_cover(name)
+            if not yoitsu_cov and base_name and base_name != name:
+                yoitsu_cov = yoitsu_service.get_anime_cover(base_name)
+            if yoitsu_cov:
+                self._save_voiranime_cached_cover(name, yoitsu_cov)
+                self._save_voiranime_cached_cover(base_name, yoitsu_cov)
+                return yoitsu_cov
+        except Exception:
+            pass
+
+        # 3. Check if detail cache has it
         cached_detail = cache_service.get_anime_details("voiranime", f"voiranime:{url}")
         if cached_detail and cached_detail.get("cover"):
             raw_c = cached_detail["cover"]
@@ -136,7 +194,7 @@ class CatalogService:
             self._save_voiranime_cached_cover(name, raw_c)
             return raw_c
 
-        # 3. Direct HTML scrape of og:image / summary image
+        # 4. Direct HTML scrape of og:image / summary image
         try:
             r = await self.client.get(url, timeout=3.5, headers={"Referer": "https://voir-anime.to/"})
             if r.status_code == 200:
@@ -167,29 +225,71 @@ class CatalogService:
             return 100.0
         if q_lower in t_lower:
             return 90.0 + (len(q_lower) / len(t_lower)) * 5.0
+        # Check canonical aliases match as strong match
+        if q_lower in CANONICAL_ALIASES and CANONICAL_ALIASES[q_lower] in t_lower:
+            return 95.0
         q_tokens = [w for w in q_lower.split() if len(w) > 1]
         if not q_tokens:
             return 0.0
         matched_tokens = [w for w in q_tokens if w in t_lower]
         return (len(matched_tokens) / len(q_tokens)) * 70.0
 
+    def _group_voiranime_entries(self, items: list) -> list:
+        """Unifies individual season/variant entries (e.g. S2, VF, Specials) into their parent Anime object."""
+        grouped = {}
+        for it in items:
+            name = it.get("title", it.get("name", ""))
+            url = it.get("link", it.get("lien", it.get("url", "")))
+            cover = it.get("cover", "")
+            if not name or not url:
+                continue
+            base_title = get_base_anime_title(name)
+            base_key = base_title.lower()
+
+            if base_key not in grouped:
+                grouped[base_key] = {
+                    "id": f"va:{url}",
+                    "title": base_title,
+                    "source": "voiranime",
+                    "url": url,
+                    "cover": cover,
+                    "_score": it.get("_score", 0)
+                }
+            else:
+                if cover and not grouped[base_key].get("cover"):
+                    grouped[base_key]["cover"] = cover
+                # If exact title match with base, use its URL as primary
+                if name.lower().strip() == base_key:
+                    grouped[base_key]["url"] = url
+                    grouped[base_key]["id"] = f"va:{url}"
+                    if cover:
+                        grouped[base_key]["cover"] = cover
+        return list(grouped.values())
+
     async def search(self, query: str = "", source: str = "all") -> list:
         results = []
         tasks = []
+        q_clean = query.strip()
+        search_queries = get_canonical_search_queries(q_clean) if q_clean else [""]
 
-        if source in ["all", "anime_sama"]:
-            tasks.append(self._search_anime_sama(query))
-        if source in ["all", "voiranime"]:
-            tasks.append(self._search_voiranime(query))
+        for q_term in search_queries:
+            if source in ["all", "anime_sama"]:
+                tasks.append(self._search_anime_sama(q_term))
+            if source in ["all", "voiranime"]:
+                tasks.append(self._search_voiranime(q_term))
 
         if tasks:
             res_list = await asyncio.gather(*tasks, return_exceptions=True)
+            seen_ids = set()
             for res in res_list:
                 if isinstance(res, list):
-                    results.extend(res)
+                    for item in res:
+                        item_id = item.get("id") or f"{item.get('source')}:{item.get('title')}"
+                        if item_id not in seen_ids:
+                            seen_ids.add(item_id)
+                            results.append(item)
 
         # Relevance scoring & filtering
-        q_clean = query.strip()
         if q_clean and results:
             has_strong_match = False
             for item in results:
@@ -274,25 +374,28 @@ class CatalogService:
                     data = resp.json()
                     matches = data.get("results", data) if isinstance(data, dict) else data
                     if isinstance(matches, list):
-                        # 1. Resolve missing covers concurrently
+                        # Unify sub-seasons (e.g. Season II, Specials, VF) under parent Anime
+                        grouped_matches = self._group_voiranime_entries(matches)
+
+                        # Resolve missing covers concurrently
                         missing_items = [
-                            m for m in matches
-                            if not m.get("cover") and not self._get_voiranime_cached_cover(m.get("title", m.get("name", "")))
+                            m for m in grouped_matches
+                            if not m.get("cover") and not self._get_voiranime_cached_cover(m.get("title", ""))
                         ]
                         if missing_items:
                             tasks = [
                                 self._resolve_voiranime_cover(
-                                    item.get("title", item.get("name", "")),
+                                    item.get("title", ""),
                                     item.get("link", item.get("lien", item.get("url", "")))
                                 )
-                                for item in missing_items[:12]
+                                for item in missing_items[:15]
                             ]
                             resolved_covers = await asyncio.gather(*tasks, return_exceptions=True)
                             for idx, cov in enumerate(resolved_covers):
                                 if isinstance(cov, str) and cov:
                                     missing_items[idx]["cover"] = cov
 
-                        for item in matches:
+                        for item in grouped_matches:
                             name = item.get("title", item.get("name", ""))
                             url = item.get("link", item.get("lien", item.get("url", "")))
                             cover = item.get("cover", "")
@@ -314,39 +417,50 @@ class CatalogService:
 
                 if resp.status_code == 200:
                     data = resp.json()
+                    raw_items = []
                     if isinstance(data, list):
-                        for item in data[:300]:
-                            name = item.get("title", "")
-                            url = item.get("link", "")
-                            cover = item.get("cover", "")
-                            if not cover:
-                                cover = self._get_voiranime_cached_cover(name)
-                            cover = self._format_cover_url(cover)
-                            if name and url:
-                                results.append({
-                                    "id": f"va:{url}",
-                                    "title": name,
-                                    "source": "voiranime",
-                                    "url": url,
-                                    "cover": cover
-                                })
+                        raw_items = data[:300]
                     elif isinstance(data, dict):
                         cat_dict = data.get("catalog", data)
-                        count = 0
                         if isinstance(cat_dict, dict):
-                            for name, url in cat_dict.items():
-                                cover = self._get_voiranime_cached_cover(name)
-                                cover = self._format_cover_url(cover)
-                                results.append({
-                                    "id": f"va:{url}",
-                                    "title": name,
-                                    "source": "voiranime",
-                                    "url": url,
-                                    "cover": cover
-                                })
-                                count += 1
-                                if count >= 300:
-                                    break
+                            raw_items = [{"title": k, "link": v} for k, v in list(cat_dict.items())[:300]]
+
+                    # Unify sub-seasons (e.g. S2, VF, Specials) under parent Anime
+                    grouped_items = self._group_voiranime_entries(raw_items)
+
+                    # Concurrently resolve missing covers in base catalogue
+                    missing_items = [
+                        m for m in grouped_items
+                        if not m.get("cover") and not self._get_voiranime_cached_cover(m.get("title", ""))
+                    ]
+                    if missing_items:
+                        tasks = [
+                            self._resolve_voiranime_cover(
+                                item.get("title", ""),
+                                item.get("link", item.get("lien", item.get("url", "")))
+                            )
+                            for item in missing_items[:20]
+                        ]
+                        resolved_covers = await asyncio.gather(*tasks, return_exceptions=True)
+                        for idx, cov in enumerate(resolved_covers):
+                            if isinstance(cov, str) and cov:
+                                missing_items[idx]["cover"] = cov
+
+                    for item in grouped_items:
+                        name = item.get("title", item.get("name", ""))
+                        url = item.get("link", item.get("lien", item.get("url", "")))
+                        cover = item.get("cover", "")
+                        if not cover:
+                            cover = self._get_voiranime_cached_cover(name)
+                        cover = self._format_cover_url(cover)
+                        if name and url:
+                            results.append({
+                                "id": f"va:{url}",
+                                "title": name,
+                                "source": "voiranime",
+                                "url": url,
+                                "cover": cover
+                            })
         except Exception as e:
             print(f"[CatalogService] Error querying VoirAnime API: {e}")
 

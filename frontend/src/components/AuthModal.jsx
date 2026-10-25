@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, UserPlus, LogIn, Check, X, Shield, Sparkles, KeyRound, Camera, Upload, Image } from 'lucide-react';
+import { User, UserPlus, LogIn, Check, X, Shield, Sparkles, KeyRound, Camera, Upload, Image, Trash2, AlertTriangle } from 'lucide-react';
 
 const AVATARS = ['👤', '🦊', '🐉', '⚡', '🔥', '🌊', '⚔️', '🎭', '👑', '🍥', '🐱', '🌸'];
 
@@ -39,10 +39,39 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
   const [errorMsg, setErrorMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
+  // User deletion state
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // Profile picture upload
   const fileInputRef = useRef(null);
   const [avatarPreview, setAvatarPreview] = useState(null); // data URI preview for new profile
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+
+  const handleDeleteUser = async (user) => {
+    if (!user) return;
+    setIsDeleting(true);
+    setErrorMsg('');
+    try {
+      const res = await fetch(`/api/users/${user.id}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Erreur lors de la suppression de l'utilisateur.");
+      }
+      if (currentUser?.id === user.id) {
+        onSelectUser(null);
+      }
+      setUserToDelete(null);
+      setSelectedUserForLogin(null);
+      fetchUsers();
+    } catch (err) {
+      setErrorMsg(err.message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const fetchUsers = () => {
     fetch('/api/users')
@@ -228,6 +257,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
         className="surface animate-fade-in"
         onClick={(e) => e.stopPropagation()}
         style={{
+          position: 'relative',
           width: '100%',
           maxWidth: '480px',
           maxHeight: '90vh',
@@ -332,11 +362,38 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                         </div>
                       </div>
 
-                      {isSelected && (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
-                          <Check size={14} /> Actif
-                        </span>
-                      )}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {isSelected && (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                            <Check size={14} /> Actif
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-icon"
+                          style={{
+                            color: 'var(--text-dim)',
+                            background: 'transparent',
+                            border: 'none',
+                            padding: '6px',
+                            cursor: 'pointer',
+                            borderRadius: 'var(--radius-sm)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'color 0.2s'
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.color = '#F85149'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-dim)'; }}
+                          title={`Supprimer le compte de ${user.username}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setUserToDelete(user);
+                          }}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -491,6 +548,29 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                     ))}
                   </div>
                 </div>
+
+                {/* Danger zone to delete current user */}
+                <div style={{ marginTop: '18px', paddingTop: '14px', borderTop: '1px solid rgba(248, 81, 73, 0.2)' }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{
+                      width: '100%',
+                      color: '#F85149',
+                      borderColor: 'rgba(248, 81, 73, 0.3)',
+                      background: 'rgba(248, 81, 73, 0.08)',
+                      fontSize: '0.8rem',
+                      padding: '8px 12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px'
+                    }}
+                    onClick={() => setUserToDelete(currentUser)}
+                  >
+                    <Trash2 size={14} /> Supprimer ce compte et toutes ses données
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -618,6 +698,79 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
               <UserPlus size={15} /> Créer le profil
             </button>
           </form>
+        )}
+
+        {/* User Deletion Confirmation Modal Overlay */}
+        {userToDelete && (
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(13, 17, 23, 0.95)',
+            backdropFilter: 'blur(8px)',
+            borderRadius: 'var(--radius-md)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+            textAlign: 'center',
+            zIndex: 80,
+            gap: '14px'
+          }}>
+            <div style={{
+              width: '48px',
+              height: '48px',
+              borderRadius: '50%',
+              background: 'rgba(248, 81, 73, 0.15)',
+              border: '1px solid rgba(248, 81, 73, 0.4)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+              <AlertTriangle size={24} color="#F85149" />
+            </div>
+
+            <div>
+              <h4 style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', marginBottom: '6px' }}>
+                Supprimer le profil « {userToDelete.username} » ?
+              </h4>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.4, maxWidth: '340px' }}>
+                Cette action est irréversible. L'ensemble des données associées (historique de lecture, progression des épisodes, animes récents) seront définitivement effacées.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', width: '100%', maxWidth: '320px', marginTop: '8px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ flex: 1, fontSize: '0.82rem' }}
+                onClick={() => setUserToDelete(null)}
+                disabled={isDeleting}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{
+                  flex: 1,
+                  background: '#DA3633',
+                  color: '#fff',
+                  border: 'none',
+                  fontSize: '0.82rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px'
+                }}
+                onClick={() => handleDeleteUser(userToDelete)}
+                disabled={isDeleting}
+              >
+                {isDeleting ? <span className="animate-spin">⏳</span> : <Trash2 size={14} />}
+                {isDeleting ? "Suppression..." : "Supprimer"}
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

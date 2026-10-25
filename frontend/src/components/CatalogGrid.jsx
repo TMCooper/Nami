@@ -1,6 +1,26 @@
 import React from 'react';
 import { Play, RotateCcw, Shuffle, Sparkles, Clock, History, Film } from 'lucide-react';
 
+export const DEFAULT_ANIME_COVER = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#161B22"/>
+      <stop offset="50%" stop-color="#0D1117"/>
+      <stop offset="100%" stop-color="#090D12"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF385C"/>
+      <stop offset="100%" stop-color="#00B4D8"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)"/>
+  <circle cx="150" cy="180" r="48" fill="url(#g)" opacity="0.2"/>
+  <polygon points="142,160 166,180 142,200" fill="#ffffff" opacity="0.9"/>
+  <text x="150" y="248" text-anchor="middle" fill="#8B949E" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" letter-spacing="1.5">NAMI</text>
+</svg>
+`);
+
 export default function CatalogGrid({
   results = [],
   isLoading,
@@ -158,9 +178,9 @@ export default function CatalogGrid({
               >
                 <div style={{ width: '100%', height: '180px', overflow: 'hidden', background: '#0D1117' }}>
                   <img
-                    src={anime.cover || 'https://via.placeholder.com/200x280/0d1117/8b949e?text=Anime'}
+                    src={anime.cover || DEFAULT_ANIME_COVER}
                     alt={anime.title}
-                    onError={(e) => { e.target.src = 'https://via.placeholder.com/200x280/0d1117/8b949e?text=Anime'; }}
+                    onError={(e) => { e.target.src = DEFAULT_ANIME_COVER; }}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                 </div>
@@ -216,9 +236,9 @@ export default function CatalogGrid({
               >
                 <div style={{ width: '100%', height: '220px', overflow: 'hidden', background: '#0D1117' }}>
                   <img
-                    src={anime.cover || 'https://via.placeholder.com/200x280/0d1117/8b949e?text=Anime'}
+                    src={anime.cover || DEFAULT_ANIME_COVER}
                     alt={anime.title}
-                    onError={(e) => { e.target.src = 'https://via.placeholder.com/200x280/0d1117/8b949e?text=Anime'; }}
+                    onError={(e) => { e.target.src = DEFAULT_ANIME_COVER; }}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                 </div>
@@ -292,10 +312,10 @@ export default function CatalogGrid({
                 >
                   <div style={{ position: 'relative', width: '100%', height: '260px', overflow: 'hidden', background: '#0D1117' }}>
                     <img
-                      src={anime.cover || 'https://via.placeholder.com/280x380/0d1117/8b949e?text=Anime'}
+                      src={anime.cover || DEFAULT_ANIME_COVER}
                       alt={anime.title}
                       onError={(e) => {
-                        e.target.src = 'https://via.placeholder.com/280x380/0d1117/8b949e?text=Anime';
+                        e.target.src = DEFAULT_ANIME_COVER;
                       }}
                       style={{
                         width: '100%',

@@ -121,4 +121,31 @@ class UserService:
             }
         return None
 
+    def delete_user(self, user_id: str) -> bool:
+        """Deletes user and completely wipes their watch history and recent entries."""
+        if user_id in self.users:
+            del self.users[user_id]
+            self._save()
+
+            # Clean user history
+            try:
+                from backend.services.history_service import history_service
+                if user_id in history_service.history:
+                    del history_service.history[user_id]
+                    history_service._save()
+            except Exception as e:
+                print(f"[UserService] Error deleting user history: {e}")
+
+            # Clean user recent items
+            try:
+                from backend.services.cache_service import cache_service
+                if user_id in cache_service.recent_data:
+                    del cache_service.recent_data[user_id]
+                    cache_service._save_recent()
+            except Exception as e:
+                print(f"[UserService] Error deleting user recents: {e}")
+
+            return True
+        return False
+
 user_service = UserService()

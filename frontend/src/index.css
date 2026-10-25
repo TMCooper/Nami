@@ -1,13 +1,13 @@
 :root {
   color-scheme: dark;
-  --bg-dark: #0D1117;
+  --bg-dark: #0F0F0F;
   --bg-main: var(--bg-dark);
-  --bg-surface: #161B22;
-  --bg-card: #1C2128;
-  --bg-card-hover: #22272E;
-  --bg-modal: #161B22;
-  --border-color: rgba(240, 246, 252, 0.1);
-  --border-active: rgba(240, 246, 252, 0.25);
+  --bg-surface: #181818;
+  --bg-card: #1F1F1F;
+  --bg-card-hover: #272727;
+  --bg-modal: #181818;
+  --border-color: rgba(255, 255, 255, 0.1);
+  --border-active: rgba(255, 255, 255, 0.25);
   
   --primary: #E50914;
   --primary-hover: #F40612;
@@ -16,9 +16,9 @@
   --accent-yellow: #D29922;
   --yt-red: #FF0000;
 
-  --text-main: #F0F6FC;
-  --text-muted: #8B949E;
-  --text-dim: #6E7681;
+  --text-main: #F1F1F1;
+  --text-muted: #AAAAAA;
+  --text-dim: #717171;
   
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -52,11 +52,11 @@ body {
   background: var(--bg-dark);
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363D;
+  background: #3F3F3F;
   border-radius: var(--radius-full);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #484F58;
+  background: #565656;
 }
 
 /* Clean Surface Utilities */
@@ -94,12 +94,12 @@ body {
 }
 
 .btn-secondary {
-  background: #21262D;
+  background: #272727;
   color: var(--text-main);
   border: 1px solid var(--border-color);
 }
 .btn-secondary:hover {
-  background: #30363D;
+  background: #3F3F3F;
   border-color: var(--border-active);
 }
 
@@ -117,7 +117,7 @@ body {
 .btn-ghost:hover {
   color: var(--text-main);
   border-color: var(--border-active);
-  background: rgba(240, 246, 252, 0.04);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .btn-icon {
@@ -198,7 +198,7 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: rgba(13, 17, 23, 0.75);
+  background: rgba(15, 15, 15, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.18);
   color: #fff;
   cursor: pointer;
@@ -237,7 +237,7 @@ body {
 }
 @media (hover: hover) and (pointer: fine) {
   .card-action:hover {
-    background: rgba(13, 17, 23, 0.95);
+    background: rgba(15, 15, 15, 0.95);
   }
   .card-action.active:hover {
     background: var(--primary-hover);
@@ -247,5 +247,317 @@ body {
   }
   .continue-card:hover .continue-play {
     opacity: 1;
+  }
+}
+
+/* --- Phase 3: YouTube-style layout --- */
+
+/* Chips: navigation and filters, one scrollable row on narrow screens */
+.chip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+.chip-row::-webkit-scrollbar {
+  display: none;
+}
+.chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.chip.active {
+  background: #F1F1F1;
+  color: #0F0F0F;
+}
+.chip-count {
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+}
+.chip.active .chip-count {
+  background: #0F0F0F;
+}
+.chip-divider {
+  flex-shrink: 0;
+  width: 1px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0 4px;
+}
+
+/* Header: round icon buttons and the search pill */
+.icon-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s ease;
+}
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.icon-btn-badge {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.search-pill {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  max-width: 640px;
+}
+.search-pill-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.search-pill input {
+  width: 100%;
+  height: 40px;
+  padding: 0 40px 0 16px;
+  background: #121212;
+  border: 1px solid #303030;
+  border-right: none;
+  border-radius: 40px 0 0 40px;
+  color: #fff;
+  font: inherit;
+  font-size: 0.92rem;
+  outline: none;
+}
+.search-pill input:focus {
+  border-color: #1C62B9;
+}
+.search-pill-submit {
+  flex-shrink: 0;
+  width: 60px;
+  height: 40px;
+  border: 1px solid #303030;
+  border-radius: 0 40px 40px 0;
+  background: #222;
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.app-header {
+  padding: 10px 24px 8px;
+}
+.app-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+@media (max-width: 640px) {
+  .app-header-row {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .app-header-row .search-pill {
+    order: 3;
+    flex-basis: 100%;
+    max-width: none;
+  }
+  /* Logo and actions share the first line on phones */
+  .app-header {
+    padding: 10px 12px 8px;
+  }
+  .app-header .logo-badge {
+    display: none;
+  }
+  .app-header .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* Shelves and card grids */
+.shelf-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #fff;
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(130px, 28vw, 180px), 1fr));
+  gap: 24px 14px;
+}
+
+/* Anime cards: rounded poster, title and sources below, nothing boxed (YouTube) */
+.anime-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.anime-card-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+.anime-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.3s ease;
+}
+.anime-card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-main);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.anime-card-meta {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.anime-card:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 3px;
+}
+
+/* Hover preview (mouse only: AnimeCard never opens it for touch) */
+.anime-preview {
+  background: #212121;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
+  cursor: pointer;
+  animation: previewIn 0.18s ease-out;
+}
+@keyframes previewIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+.anime-preview-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #0F0F0F;
+}
+.anime-preview-media iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.anime-preview-body {
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Loading placeholders */
+.skeleton-block,
+.skeleton-line {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.06) 25%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0.06) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chip:not(.active):hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+  .icon-btn:not(:disabled):hover,
+  .search-pill-submit:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .anime-card:hover .anime-card-thumb img {
+    transform: scale(1.04);
+  }
+  /* With a mouse the bookmark shows on hover (or once active); on touch it is always there */
+  .anime-card .card-action:not(.active) {
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+  }
+  .anime-card:hover .card-action,
+  .anime-card:focus-within .card-action {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anime-preview,
+  .skeleton-block,
+  .skeleton-line {
+    animation: none;
+  }
+  .anime-card-thumb img {
+    transition: none;
   }
 }

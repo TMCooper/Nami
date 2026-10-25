@@ -20,7 +20,7 @@ import httpx
 
 from backend.services.cache_service import cache_service
 from backend.services.catalog_service import catalog_service, get_canonical_search_queries, CatalogService, SEARCH_COVER_WAIT
-from backend.services.anime_refs import primary_ident
+from backend.services.anime_refs import clean_trailer, primary_ident
 from backend.services.cover_utils import client_cover_url, is_usable_cover, is_trusted_cover, raw_cover_url, url_host
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.aliases import AliasIndex
@@ -43,6 +43,7 @@ VF_PROBE_TTL = 86400
 ENRICH_PER_SEARCH = 4
 MAX_AS_PAGES = 3
 FLUSH_DELAY = 10.0
+PREVIEW_SYNOPSIS = 280          # characters of synopsis in a card's hover preview
 SYNOPSIS_STUB = re.compile(r"^saison\s+\d+\s+de\b", re.IGNORECASE)
 AS_COVER_SLUG = re.compile(r"/Anime-Sama/IMG/(?:img/)?contenu/([A-Za-z0-9-]+)\.(?:jpe?g|png|webp)", re.IGNORECASE)
 VA_EPISODE_PATH = re.compile(r"^/anime/([^/]+)/[^/]+")   # /anime/<post slug>/<episode slug>/
@@ -302,6 +303,50 @@ class YoitsuGateway:
         key = self.index.canonical_key(entry)
         members = await asyncio.to_thread(self.index.entries_for, entity_id(key))
         return self.client_entity(build_entity(key, members or [entry]))
+
+    # --- card previews ---
+    def preview(self, eid: str, title: str = "") -> Optional[dict]:
+        """What a card shows on hover, from caches only: no scraping, no recents.
+
+        When nothing is known yet, one background AniList lookup is started so the next hover has a trailer.
+        """
+        if not eid.startswith("a-"):
+            return None
+        canonical = self.aliases.find(key_from_entity_id(eid))
+        details = cache_service.get_anime_details("entity", f"entity:{canonical}") or {}
+        name = details.get("title") or title
+        media = self.anilist.cached(name) if name else None
+        if not details and media is None and name and self.anilist.enabled \
+                and not self.anilist.has(name) and not self.anilist.busy():
+            self._spawn(self._learn_from_anilist(canonical, name))
+
+        synopsis = details.get("synopsis")
+        if not synopsis and media and media.get("description"):
+            synopsis = {"text": media["description"], "lang": "en", "origin": "anilist"}
+        if synopsis:
+            text = synopsis.get("text") or ""
+            if len(text) > PREVIEW_SYNOPSIS:
+                text = text[:PREVIEW_SYNOPSIS].rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+            synopsis = {"text": text, "lang": synopsis.get("lang", "fr")}
+
+        seasons = [s for s in details.get("seasons") or [] if not s.get("is_scans")]
+        variants = [v for s in seasons for v in s.get("variants") or []]
+        versions = []
+        if any(v.get("version") == "vostfr" and v.get("available") is not False for v in variants):
+            versions.append("vostfr")
+        if any(v.get("version") == "vf" and v.get("available") is True for v in variants):
+            versions.append("vf")  # an unprobed VF is not announced
+        return {
+            "id": entity_id(canonical),
+            "synopsis": synopsis or None,
+            "genres": (details.get("genres") or [])[:3],
+            "seasons": len(seasons) or None,
+            "versions": versions,
+            "has_scans": any(s.get("is_scans") for s in details.get("seasons") or []),
+            "trailer": clean_trailer(details.get("trailer") or (media or {}).get("trailer")),
+            "banner": client_cover_url(details.get("banner") or (media or {}).get("banner") or "") or None,
+            "year": (media or {}).get("year"),
+        }
 
     # --- history & watchlist links ---
     def canonical_id(self, eid: str) -> str:

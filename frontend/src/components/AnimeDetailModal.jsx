@@ -341,7 +341,7 @@ export default function AnimeDetailModal({
               {details?.banner && (
                 <div style={{
                   height: '120px',
-                  backgroundImage: `linear-gradient(to bottom, rgba(22,27,34,0.1), var(--bg-surface)), url("${details.banner}")`,
+                  backgroundImage: `linear-gradient(to bottom, rgba(15,15,15,0.1), var(--bg-surface)), url("${details.banner}")`,
                   backgroundSize: 'cover',
                   backgroundPosition: 'center'
                 }} />
@@ -399,7 +399,7 @@ export default function AnimeDetailModal({
                   {details?.genres?.length > 0 && (
                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                       {details.genres.slice(0, 6).map((g) => (
-                        <span key={g} className="badge" style={{ background: 'rgba(240,246,252,0.06)', color: 'var(--text-muted)' }}>{g}</span>
+                        <span key={g} className="badge" style={{ background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>{g}</span>
                       ))}
                     </div>
                   )}

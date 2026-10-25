@@ -77,7 +77,7 @@ export default function SettingsModal({ isOpen, onClose }) {
   const inputStyle = {
     width: '100%',
     padding: '9px 12px',
-    background: '#0D1117',
+    background: '#0F0F0F',
     border: '1px solid var(--border-color)',
     borderRadius: 'var(--radius-sm)',
     color: '#fff',
@@ -214,7 +214,7 @@ export default function SettingsModal({ isOpen, onClose }) {
                 <div
                   key={key}
                   style={{
-                    background: '#0D1117',
+                    background: '#0F0F0F',
                     border: '1px solid var(--border-color)',
                     borderRadius: 'var(--radius-sm)',
                     padding: '10px 14px',

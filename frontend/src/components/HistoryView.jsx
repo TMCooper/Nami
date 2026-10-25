@@ -338,7 +338,7 @@ export default function HistoryView({ currentUser, resumingKey = null, onSelectA
                   padding: '12px',
                   borderRadius: 'var(--radius-md)',
                   border: '1px solid var(--border-color)',
-                  background: 'linear-gradient(145deg, rgba(22, 27, 34, 0.85), rgba(13, 17, 23, 0.85))',
+                  background: 'linear-gradient(145deg, rgba(15, 15, 15, 0.85), rgba(15, 15, 15, 0.85))',
                   alignItems: 'center',
                   transition: 'var(--transition)',
                   position: 'relative'
@@ -361,7 +361,7 @@ export default function HistoryView({ currentUser, resumingKey = null, onSelectA
                     height: '135px',
                     borderRadius: 'var(--radius-sm)',
                     overflow: 'hidden',
-                    background: '#0D1117',
+                    background: '#0F0F0F',
                     cursor: 'pointer',
                     flexShrink: 0
                   }}

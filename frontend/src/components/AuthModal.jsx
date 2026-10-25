@@ -286,7 +286,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
 
         {/* Tab Selection if users exist */}
         {users.length > 0 && (
-          <div style={{ display: 'flex', gap: '4px', background: '#0D1117', padding: '4px', borderRadius: 'var(--radius-sm)', marginBottom: '18px', border: '1px solid var(--border-color)' }}>
+          <div style={{ display: 'flex', gap: '4px', background: '#0F0F0F', padding: '4px', borderRadius: 'var(--radius-sm)', marginBottom: '18px', border: '1px solid var(--border-color)' }}>
             <button
               style={{
                 flex: 1,
@@ -295,7 +295,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                 fontWeight: 600,
                 borderRadius: 'var(--radius-sm)',
                 border: 'none',
-                background: activeTab === 'select' ? '#21262D' : 'transparent',
+                background: activeTab === 'select' ? '#272727' : 'transparent',
                 color: activeTab === 'select' ? '#fff' : 'var(--text-muted)',
                 cursor: 'pointer'
               }}
@@ -311,7 +311,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                 fontWeight: 600,
                 borderRadius: 'var(--radius-sm)',
                 border: 'none',
-                background: activeTab === 'register' ? '#21262D' : 'transparent',
+                background: activeTab === 'register' ? '#272727' : 'transparent',
                 color: activeTab === 'register' ? '#fff' : 'var(--text-muted)',
                 cursor: 'pointer'
               }}
@@ -400,7 +400,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
               </div>
             ) : (
               <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', background: '#0D1117', borderRadius: 'var(--radius-sm)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', background: '#0F0F0F', borderRadius: 'var(--radius-sm)' }}>
                   <AvatarDisplay avatar={selectedUserForLogin.avatar} size={40} />
                   <div>
                     <h4 style={{ color: '#fff', fontWeight: 700 }}>{selectedUserForLogin.username}</h4>
@@ -422,7 +422,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                     style={{
                       width: '100%',
                       padding: '9px 12px',
-                      background: '#0D1117',
+                      background: '#0F0F0F',
                       border: '1px solid var(--border-color)',
                       borderRadius: 'var(--radius-sm)',
                       color: '#fff',
@@ -537,7 +537,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                           height: '34px',
                           borderRadius: 'var(--radius-sm)',
                           border: currentUser.avatar === emoji ? '2px solid var(--accent-cyan)' : '1px solid var(--border-color)',
-                          background: currentUser.avatar === emoji ? '#21262D' : '#0D1117',
+                          background: currentUser.avatar === emoji ? '#272727' : '#0F0F0F',
                           fontSize: '1.1rem',
                           cursor: 'pointer'
                         }}
@@ -592,7 +592,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                   width: '48px',
                   height: '48px',
                   borderRadius: '50%',
-                  background: '#0D1117',
+                  background: '#0F0F0F',
                   border: '2px solid var(--accent-cyan)',
                   display: 'flex',
                   alignItems: 'center',
@@ -633,7 +633,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                       height: '36px',
                       borderRadius: 'var(--radius-sm)',
                       border: (!avatarPreview && selectedAvatar === emoji) ? '2px solid var(--accent-cyan)' : '1px solid var(--border-color)',
-                      background: (!avatarPreview && selectedAvatar === emoji) ? '#21262D' : '#0D1117',
+                      background: (!avatarPreview && selectedAvatar === emoji) ? '#272727' : '#0F0F0F',
                       fontSize: '1.2rem',
                       cursor: 'pointer'
                     }}
@@ -661,7 +661,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                 style={{
                   width: '100%',
                   padding: '9px 12px',
-                  background: '#0D1117',
+                  background: '#0F0F0F',
                   border: '1px solid var(--border-color)',
                   borderRadius: 'var(--radius-sm)',
                   color: '#fff',
@@ -684,7 +684,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
                 style={{
                   width: '100%',
                   padding: '9px 12px',
-                  background: '#0D1117',
+                  background: '#0F0F0F',
                   border: '1px solid var(--border-color)',
                   borderRadius: 'var(--radius-sm)',
                   color: '#fff',
@@ -705,7 +705,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
           <div style={{
             position: 'absolute',
             inset: 0,
-            background: 'rgba(13, 17, 23, 0.95)',
+            background: 'rgba(15, 15, 15, 0.95)',
             backdropFilter: 'blur(8px)',
             borderRadius: 'var(--radius-md)',
             display: 'flex',

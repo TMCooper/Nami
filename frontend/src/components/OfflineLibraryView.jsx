@@ -188,7 +188,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
             display: 'flex',
             gap: '24px',
             alignItems: 'center',
-            background: 'linear-gradient(135deg, rgba(22, 27, 34, 0.95), rgba(13, 17, 23, 0.98))',
+            background: 'linear-gradient(135deg, rgba(15, 15, 15, 0.95), rgba(15, 15, 15, 0.98))',
             border: '1px solid var(--border-color)',
             flexWrap: 'wrap'
           }}
@@ -201,7 +201,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
             overflow: 'hidden',
             boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
             flexShrink: 0,
-            background: '#0D1117'
+            background: '#0F0F0F'
           }}>
             {currentAnime.cover ? (
               <img
@@ -245,7 +245,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                 </span>
               )}
               <span className="badge" style={{
-                background: 'rgba(13, 17, 23, 0.88)',
+                background: 'rgba(15, 15, 15, 0.88)',
                 color: '#ffffff',
                 border: '1px solid rgba(255, 255, 255, 0.2)',
                 fontWeight: 600,
@@ -418,7 +418,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                   style={{
                     borderRadius: 'var(--radius-sm)',
                     overflow: 'hidden',
-                    background: isSelected ? 'rgba(248, 81, 73, 0.08)' : '#0D1117',
+                    background: isSelected ? 'rgba(248, 81, 73, 0.08)' : '#0F0F0F',
                     border: isSelected ? '1px solid rgba(248, 81, 73, 0.5)' : '1px solid var(--border-color)',
                     display: 'flex',
                     flexDirection: 'column',
@@ -440,7 +440,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       position: 'relative',
                       width: '100%',
                       aspectRatio: '3 / 4',
-                      background: '#161B22',
+                      background: '#181818',
                       overflow: 'hidden',
                       cursor: 'pointer'
                     }}
@@ -471,7 +471,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       display: 'none',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      background: 'linear-gradient(135deg, #161B22, #0D1117)',
+                      background: 'linear-gradient(135deg, #181818, #0F0F0F)',
                       flexDirection: 'column',
                       gap: '8px'
                     }}>
@@ -601,7 +601,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                   style={{
                     borderRadius: 'var(--radius-sm)',
                     overflow: 'hidden',
-                    background: isSelected ? 'rgba(248, 81, 73, 0.08)' : '#0D1117',
+                    background: isSelected ? 'rgba(248, 81, 73, 0.08)' : '#0F0F0F',
                     border: isSelected ? '1px solid rgba(248, 81, 73, 0.5)' : '1px solid var(--border-color)',
                     display: 'flex',
                     flexDirection: 'column',
@@ -623,7 +623,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       position: 'relative',
                       width: '100%',
                       aspectRatio: '16 / 9',
-                      background: '#161B22',
+                      background: '#181818',
                       overflow: 'hidden',
                       cursor: 'pointer'
                     }}
@@ -661,7 +661,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       display: 'none',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      background: 'linear-gradient(135deg, #161B22, #0D1117)'
+                      background: 'linear-gradient(135deg, #181818, #0F0F0F)'
                     }}>
                       <Film size={28} color="rgba(255,255,255,0.2)" />
                     </div>
@@ -982,7 +982,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                   display: 'flex',
                   flexDirection: 'column',
                   border: '1px solid var(--border-color)',
-                  background: '#161B22'
+                  background: '#181818'
                 }}
                 onClick={() => {
                   setSelectedAnimeTitle(anime.anime_title);
@@ -1002,7 +1002,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                 }}
               >
                 {/* Card Cover with Badges */}
-                <div style={{ position: 'relative', width: '100%', height: '260px', overflow: 'hidden', background: '#0D1117' }}>
+                <div style={{ position: 'relative', width: '100%', height: '260px', overflow: 'hidden', background: '#0F0F0F' }}>
                   {anime.cover ? (
                     <img
                       src={anime.cover}
@@ -1039,7 +1039,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                   {/* Disk Size Badge */}
                   <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5 }}>
                     <span className="badge" style={{
-                      background: 'rgba(13, 17, 23, 0.88)',
+                      background: 'rgba(15, 15, 15, 0.88)',
                       color: '#ffffff',
                       border: '1px solid rgba(255, 255, 255, 0.2)',
                       fontSize: '0.72rem',
@@ -1076,7 +1076,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                     style={{
                       position: 'absolute',
                       inset: 0,
-                      background: 'linear-gradient(to top, rgba(13, 17, 23, 0.85) 0%, transparent 60%)',
+                      background: 'linear-gradient(to top, rgba(15, 15, 15, 0.85) 0%, transparent 60%)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',

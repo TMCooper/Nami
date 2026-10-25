@@ -25,7 +25,7 @@ export default function WideThumb({ sources = [], cover = '', alt = '', blur = f
   if (step === sources.length && cover) {
     // A portrait cover is never cut into a band: shown whole, over a blurred copy of itself
     return (
-      <div style={{ position: 'absolute', inset: 0, background: '#0D1117' }}>
+      <div style={{ position: 'absolute', inset: 0, background: '#0F0F0F' }}>
         {blur && (
           <img
             src={cover}

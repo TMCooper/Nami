@@ -32,7 +32,7 @@ export default function ContinueCard({ item, isResuming, onResume, onOpenAnime }
           aspectRatio: '16 / 9',
           borderRadius: 'var(--radius-md)',
           overflow: 'hidden',
-          background: '#0D1117',
+          background: '#0F0F0F',
           border: '1px solid var(--border-color)'
         }}
       >

@@ -438,3 +438,23 @@ def test_episodes_report_anime_id(gw, monkeypatch):
     result = asyncio.run(gw.episodes("a-sousou-no-frieren", "saison-1", "anime_sama", "vostfr"))
     assert result["anime_id"] == "a-frieren" and result["episodes"]
     assert asyncio.run(gw.episodes("a-frieren", "scans", "anime_sama", "vostfr"))["anime_id"] == "a-frieren"
+
+
+def test_preview_reads_caches_only(gw, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gw, "details", lambda *a, **k: calls.append(a))
+    # Nothing cached yet: an empty preview, no scraping (AniList is disabled in the fixture)
+    empty = gw.preview("a-frieren", "Frieren")
+    assert empty["id"] == "a-frieren" and empty["synopsis"] is None and empty["versions"] == [] and empty["trailer"] is None
+    assert gw.preview("frieren") is None
+    assert calls == []
+
+
+def test_preview_summarizes_cached_details(gw):
+    asyncio.run(YoitsuGateway.details(gw, "a-frieren"))
+    gw.store["recents"] = []
+    preview = gw.preview("a-frieren")
+    assert preview["synopsis"]["text"].startswith("Le jeune héros Himmel") and preview["synopsis"]["lang"] == "fr"
+    assert preview["seasons"] == 2 and preview["has_scans"] is True
+    assert preview["versions"] == ["vostfr", "vf"]          # season 1 VF was probed available
+    assert gw.store["recents"] == []                          # a hover never counts as a visit

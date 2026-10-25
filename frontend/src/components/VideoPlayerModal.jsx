@@ -937,7 +937,7 @@ export default function VideoPlayerModal({
               position: 'absolute',
               bottom: '100px',
               left: '24px',
-              background: 'rgba(22, 27, 34, 0.95)',
+              background: 'rgba(15, 15, 15, 0.95)',
               border: '1px solid var(--accent-cyan)',
               backdropFilter: 'blur(10px)',
               borderRadius: 'var(--radius-md)',
@@ -973,7 +973,7 @@ export default function VideoPlayerModal({
               bottom: 0,
               width: '320px',
               maxWidth: '85vw',
-              background: 'rgba(13, 17, 23, 0.96)',
+              background: 'rgba(15, 15, 15, 0.96)',
               borderLeft: '1px solid var(--border-color)',
               backdropFilter: 'blur(14px)',
               zIndex: 35,
@@ -1105,7 +1105,7 @@ export default function VideoPlayerModal({
                   bottom: '16px',
                   left: `${hoverPosition}%`,
                   transform: 'translateX(-50%)',
-                  background: 'rgba(13, 17, 23, 0.95)',
+                  background: 'rgba(15, 15, 15, 0.95)',
                   border: '1px solid rgba(255, 255, 255, 0.2)',
                   color: '#fff',
                   fontSize: '0.75rem',
@@ -1202,11 +1202,11 @@ export default function VideoPlayerModal({
                 }}
                 title="Vitesse de lecture"
               >
-                <option value="0.75" style={{ background: '#161B22' }}>0.75x</option>
-                <option value="1" style={{ background: '#161B22' }}>1.0x</option>
-                <option value="1.25" style={{ background: '#161B22' }}>1.25x</option>
-                <option value="1.5" style={{ background: '#161B22' }}>1.5x</option>
-                <option value="2" style={{ background: '#161B22' }}>2.0x</option>
+                <option value="0.75" style={{ background: '#181818' }}>0.75x</option>
+                <option value="1" style={{ background: '#181818' }}>1.0x</option>
+                <option value="1.25" style={{ background: '#181818' }}>1.25x</option>
+                <option value="1.5" style={{ background: '#181818' }}>1.5x</option>
+                <option value="2" style={{ background: '#181818' }}>2.0x</option>
               </select>
 
               {hasNextEp && onSelectNextEpisode && (

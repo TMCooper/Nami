@@ -1,10 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Bookmark, Play, Loader2 } from 'lucide-react';
-import WatchlistButton from './WatchlistButton';
-import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
+import AnimeCard from './AnimeCard';
 import { sameAnime, formatRelativeDate } from '../utils/animes';
-
-const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
 
 export default function WatchlistView({
   currentUser,
@@ -82,18 +79,10 @@ export default function WatchlistView({
 
         {/* Sort */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <button
-            className={`btn ${sortMode === 'recent' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setSortMode('recent')}
-            style={{ fontSize: '0.78rem', padding: '5px 12px', borderRadius: 'var(--radius-full)' }}
-          >
+          <button className={`chip${sortMode === 'recent' ? ' active' : ''}`} onClick={() => setSortMode('recent')}>
             Récemment ajoutés
           </button>
-          <button
-            className={`btn ${sortMode === 'title' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setSortMode('title')}
-            style={{ fontSize: '0.78rem', padding: '5px 12px', borderRadius: 'var(--radius-full)' }}
-          >
+          <button className={`chip${sortMode === 'title' ? ' active' : ''}`} onClick={() => setSortMode('title')}>
             Titre (A-Z)
           </button>
         </div>
@@ -117,82 +106,38 @@ export default function WatchlistView({
           </p>
         </div>
       ) : (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(clamp(130px, 40vw, 170px), 1fr))',
-          gap: '14px'
-        }}>
+        <div className="card-grid">
           {rows.map(({ item, ghost }) => {
             const resume = continueWatching.find((c) => c.anime && sameAnime(c.anime, item));
             const isResuming = Boolean(resume) && resumingKey === resume.key; // waiting for its season list
             return (
-              <div
+              <AnimeCard
                 key={item.id || item.url}
-                className="surface-card animate-fade-in"
-                onClick={() => onSelectAnime(item)}
-                style={{
-                  borderRadius: 'var(--radius-sm)',
-                  overflow: 'hidden',
-                  cursor: 'pointer',
-                  border: '1px solid var(--border-color)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  opacity: ghost ? 0.45 : 1,
-                  transition: 'var(--transition)'
-                }}
+                anime={item}
+                onSelect={onSelectAnime}
+                watchlisted={!ghost}
+                onToggleWatchlist={toggle}
+                meta={`Ajouté ${formatRelativeDate(item.added_at).toLowerCase()}`}
+                progress={resume && !resume.is_next ? resume.progress_percent : null}
+                dimmed={ghost}
               >
-                <div style={{ position: 'relative', width: '100%', aspectRatio: '2 / 3', background: '#0D1117', overflow: 'hidden' }}>
-                  <img
-                    src={item.cover || DEFAULT_ANIME_COVER}
-                    loading="lazy"
-                    decoding="async"
-                    alt={item.title}
-                    onError={imageFallback(item.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
-
-                  <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5, display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                    {(item.sources?.length ? item.sources : [{ source: item.source }]).map((s) => (
-                      <span key={s.source} className={`badge ${s.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`}>
-                        {SOURCE_LABELS[s.source] || s.source}
-                      </span>
-                    ))}
-                  </div>
-
-                  <WatchlistButton active={!ghost} onToggle={() => toggle(item)} />
-
-                  {resume && !resume.is_next && (
-                    <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '4px', background: 'rgba(255,255,255,0.25)' }}>
-                      <div style={{ width: `${Math.min(100, Math.max(2, resume.progress_percent))}%`, height: '100%', background: 'var(--yt-red)' }}></div>
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff', lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                    {item.title}
-                  </span>
-                  <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-                    Ajouté {formatRelativeDate(item.added_at).toLowerCase()}
-                  </span>
-                  {resume && (
-                    <button
-                      className="btn btn-primary"
-                      style={{ width: '100%', minHeight: '36px', fontSize: '0.78rem', padding: '6px 10px', marginTop: 'auto' }}
-                      aria-disabled={isResuming}
-                      aria-busy={isResuming}
-                      onClick={(e) => {
-                        // Not `disabled`: the tap must still stop here, never open the card behind it
-                        e.stopPropagation();
-                        if (!isResuming) onResumeEpisode(resume);
-                      }}
-                    >
-                      {isResuming ? <Loader2 className="animate-spin" size={12} /> : <Play size={12} fill="#fff" />}{' '}
-                      {resume.is_next ? `Suivant · Ép. ${resume.episode_num}` : `Reprendre · Ép. ${resume.episode_num}`}
-                    </button>
-                  )}
-                </div>
-              </div>
+                {resume && (
+                  <button
+                    className="btn btn-primary"
+                    style={{ width: '100%', minHeight: '36px', fontSize: '0.78rem', padding: '6px 10px', marginTop: '6px', borderRadius: 'var(--radius-full)' }}
+                    aria-disabled={isResuming}
+                    aria-busy={isResuming}
+                    onClick={(e) => {
+                      // Not `disabled`: the tap must still stop here, never open the card behind it
+                      e.stopPropagation();
+                      if (!isResuming) onResumeEpisode(resume);
+                    }}
+                  >
+                    {isResuming ? <Loader2 className="animate-spin" size={12} /> : <Play size={12} fill="#fff" />}{' '}
+                    {resume.is_next ? `Suivant · Ép. ${resume.episode_num}` : `Reprendre · Ép. ${resume.episode_num}`}
+                  </button>
+                )}
+              </AnimeCard>
             );
           })}
         </div>

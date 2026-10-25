@@ -641,7 +641,7 @@ export default function App() {
             bottom: 'calc(20px + env(safe-area-inset-bottom))',
             transform: 'translateX(-50%)',
             zIndex: 60,
-            background: '#21262D',
+            background: '#272727',
             border: '1px solid var(--border-active)',
             borderRadius: 'var(--radius-full)',
             padding: '8px 16px',

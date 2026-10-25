@@ -1,4 +1,6 @@
-# Stage 1: Build Frontend
+# ==========================================
+# Stage 1: Build Frontend (Vite + React)
+# ==========================================
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
@@ -6,10 +8,12 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-# Stage 2: Final Backend Container
+# ==========================================
+# Stage 2: Unified Lightweight Runner (Raspberry Pi & PC compatible)
+# ==========================================
 FROM python:3.11-slim AS runner
 
-# Install FFmpeg, git, and system dependencies
+# Install FFmpeg, git (for auto-updating and cloning APIs), and curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -19,29 +23,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy Python requirements & install
+# Install main requirements (including YoitsuWrap & yt-dlp)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Clone submodules directly (avoids empty submodule dirs if not initialized on host)
+# Clone the API repositories directly at build/runtime (not part of Nami repo)
 RUN git clone --depth 1 https://github.com/TMCooper/AnimeSamaApi.git /app/AnimeSamaApi \
     && git clone --depth 1 https://github.com/TMCooper/voiranime_API.git /app/voiranime_API
 
-# Install submodule-specific Python dependencies
+# Install dependencies for internal APIs
 RUN pip install --no-cache-dir -r /app/AnimeSamaApi/requirements.txt || true
 RUN pip install --no-cache-dir -r /app/voiranime_API/requirements.txt || true
 
-# Copy app backend code
+# Copy backend application
 COPY backend /app/backend
-RUN mkdir -p /app/data
 
-# Copy built frontend assets from builder stage
+# Create persistent storage mountpoints
+RUN mkdir -p /app/data /downloads
+
+# Copy compiled frontend from builder
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
-# Expose port 8080 (bound to 0.0.0.0 for LAN access)
+# Expose port 8080 (LAN & Docker accessible)
 EXPOSE 8080
 
-# Environment variables
 ENV PYTHONUNBUFFERED=1
+ENV DOWNLOADS_DIR=/downloads
+ENV DATA_DIR=/app/data
 
+# Run unified server on port 8080
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080"]

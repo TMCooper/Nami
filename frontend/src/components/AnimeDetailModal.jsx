@@ -1,53 +1,83 @@
 import React, { useState, useEffect } from 'react';
-import { X, Play, Download, Check, Loader2, CheckCircle2 } from 'lucide-react';
+import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, HardDrive } from 'lucide-react';
 
-export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDownloadEpisode, onDownloadBulk }) {
+export default function AnimeDetailModal({
+  currentUser,
+  anime,
+  onClose,
+  onPlayEpisode,
+  onDownloadEpisode,
+  onDownloadBulk
+}) {
   const [details, setDetails] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedSeason, setSelectedSeason] = useState(null);
   const [episodes, setEpisodes] = useState([]);
   const [isLoadingEpisodes, setIsLoadingEpisodes] = useState(false);
   const [history, setHistory] = useState({});
+  const [downloadedEpisodes, setDownloadedEpisodes] = useState({}); // { "1": { file_path, size_mb } }
 
-  // Fetch anime details & watch history
-  useEffect(() => {
+  const userId = currentUser?.id || 'default';
+
+  // Fetch anime details & watch history for current user
+  const loadAnimeDetails = (forceRefresh = false) => {
     if (!anime) return;
     setIsLoading(true);
 
-    fetch('/api/history')
+    fetch('/api/history', {
+      headers: { 'X-User-ID': userId }
+    })
       .then((res) => res.json())
       .then((data) => setHistory(data || {}))
       .catch(() => {});
 
-    fetch(`/api/details?url=${encodeURIComponent(anime.url)}&source=${anime.source}`)
+    fetch(`/api/details?url=${encodeURIComponent(anime.url)}&source=${anime.source}&refresh=${forceRefresh}`, {
+      headers: { 'X-User-ID': userId }
+    })
       .then((res) => res.json())
       .then((data) => {
         setDetails(data);
         if (data.seasons && data.seasons.length > 0) {
-          setSelectedSeason(data.seasons[0]);
-          loadSeasonEpisodes(data.seasons[0].url);
+          const firstSeason = data.seasons[0];
+          setSelectedSeason(firstSeason);
+          loadSeasonEpisodes(firstSeason.url, firstSeason.name, forceRefresh);
         } else if (data.episodes) {
           setEpisodes(data.episodes);
+          checkDownloadedStatus(data.title || anime.title, "Saison 1");
         }
       })
       .catch((err) => console.error("Error loading details:", err))
       .finally(() => setIsLoading(false));
-  }, [anime]);
+  };
 
-  const loadSeasonEpisodes = (seasonUrl) => {
+  useEffect(() => {
+    loadAnimeDetails(false);
+  }, [anime, userId]);
+
+  const loadSeasonEpisodes = (seasonUrl, seasonName = 'Saison 1', forceRefresh = false) => {
     setIsLoadingEpisodes(true);
-    fetch(`/api/episodes?season_url=${encodeURIComponent(seasonUrl)}`)
+    fetch(`/api/episodes?season_url=${encodeURIComponent(seasonUrl)}&refresh=${forceRefresh}`)
       .then((res) => res.json())
       .then((data) => {
-        setEpisodes(data.episodes || []);
+        const eps = data.episodes || [];
+        setEpisodes(eps);
+        checkDownloadedStatus(details?.title || anime?.title, seasonName);
       })
       .catch((err) => console.error("Error loading episodes:", err))
       .finally(() => setIsLoadingEpisodes(false));
   };
 
+  const checkDownloadedStatus = (title, seasonName) => {
+    if (!title) return;
+    fetch(`/api/episodes/download-status?anime_title=${encodeURIComponent(title)}&season=${encodeURIComponent(seasonName)}`)
+      .then((res) => res.json())
+      .then((data) => setDownloadedEpisodes(data.downloaded_episodes || {}))
+      .catch(() => {});
+  };
+
   const handleSeasonChange = (season) => {
     setSelectedSeason(season);
-    loadSeasonEpisodes(season.url);
+    loadSeasonEpisodes(season.url, season.name, false);
   };
 
   const isEpisodeWatched = (seasonName, epNum) => {
@@ -62,40 +92,45 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
     const title = details?.title || anime?.title;
     fetch('/api/history/toggle-watched', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-ID': userId
+      },
       body: JSON.stringify({
+        user_id: userId,
         anime_title: title,
         season: seasonName,
-        ep_id: str(epNum)
+        ep_id: String(epNum)
       })
     })
       .then((res) => res.json())
       .then(() => {
-        // Refresh local history
-        return fetch('/api/history').then((res) => res.json());
+        return fetch('/api/history', { headers: { 'X-User-ID': userId } }).then((res) => res.json());
       })
       .then((data) => setHistory(data || {}))
       .catch((err) => console.error("Error toggling watched:", err));
   };
 
-  const str = (val) => String(val);
-
   const handleMarkSeasonWatched = () => {
     const title = details?.title || anime?.title;
     const sName = selectedSeason?.name || 'Saison 1';
-    const epIds = episodes.map((ep) => str(ep.num || ep.title || '1'));
+    const epIds = episodes.map((ep) => String(ep.num || ep.title || '1'));
 
     fetch('/api/history/mark-season', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-ID': userId
+      },
       body: JSON.stringify({
+        user_id: userId,
         anime_title: title,
         season: sName,
         ep_ids: epIds,
         watched: true
       })
     })
-      .then(() => fetch('/api/history').then((res) => res.json()))
+      .then(() => fetch('/api/history', { headers: { 'X-User-ID': userId } }).then((res) => res.json()))
       .then((data) => setHistory(data || {}))
       .catch((err) => console.error("Error marking season:", err));
   };
@@ -103,6 +138,8 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
   if (!anime) return null;
 
   const currentSeasonName = selectedSeason?.name || 'Saison 1';
+  const animeTitle = details?.title || anime.title;
+  const animeCover = details?.cover || anime.cover || 'https://via.placeholder.com/180x260';
 
   return (
     <div style={{
@@ -121,13 +158,15 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: '850px',
-          maxHeight: '88vh',
+          maxWidth: '880px',
+          maxHeight: '90vh',
           borderRadius: 'var(--radius-md)',
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          position: 'relative'
+          position: 'relative',
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border-color)'
         }}
       >
         {/* Close Button */}
@@ -146,28 +185,43 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
 
         {isLoading ? (
           <div style={{ padding: '80px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
-            <Loader2 className="animate-spin" size={24} color="var(--primary)" />
-            <span>Chargement...</span>
+            <Loader2 className="animate-spin" size={28} color="var(--primary)" />
+            <span>Chargement des informations de l'anime...</span>
           </div>
         ) : (
           <div style={{ overflowY: 'auto', padding: '24px' }}>
             {/* Header Info */}
             <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
               <img
-                src={details?.cover || anime.cover || 'https://via.placeholder.com/180x260'}
-                alt={details?.title || anime.title}
+                src={animeCover}
+                alt={animeTitle}
+                onError={(e) => {
+                  e.target.src = 'https://via.placeholder.com/180x260/0d1117/8b949e?text=Anime';
+                }}
                 style={{
                   width: '160px',
                   height: '230px',
                   objectFit: 'cover',
-                  borderRadius: 'var(--radius-sm)'
+                  borderRadius: 'var(--radius-sm)',
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.4)'
                 }}
               />
               <div style={{ flex: 1, minWidth: '260px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <span className={`badge ${anime.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`} style={{ width: 'fit-content' }}>
-                  {anime.source === 'anime_sama' ? 'Anime-Sama' : 'VoirAnime'}
-                </span>
-                <h2 style={{ fontSize: '1.6rem', fontWeight: 800 }}>{details?.title || anime.title}</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className={`badge ${anime.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`}>
+                    {anime.source === 'anime_sama' ? 'Anime-Sama' : 'VoirAnime'}
+                  </span>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                    onClick={() => loadAnimeDetails(true)}
+                    title="Actualiser le cache pour cet anime"
+                  >
+                    <RotateCw size={11} style={{ marginRight: '4px' }} /> Actualiser
+                  </button>
+                </div>
+
+                <h2 style={{ fontSize: '1.6rem', fontWeight: 800 }}>{animeTitle}</h2>
                 {details?.synopsis && (
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', lineHeight: '1.5', maxHeight: '90px', overflowY: 'auto' }}>
                     {details.synopsis}
@@ -194,7 +248,7 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
 
             {/* Episode List Section */}
             <div style={{ marginTop: '28px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
                 <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>
                   Épisodes ({episodes.length})
                 </h3>
@@ -210,7 +264,7 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
                     <button
                       className="btn btn-secondary"
                       style={{ fontSize: '0.78rem', padding: '4px 10px' }}
-                      onClick={() => onDownloadBulk(details?.title || anime.title, currentSeasonName, episodes)}
+                      onClick={() => onDownloadBulk(animeTitle, currentSeasonName, episodes)}
                     >
                       <Download size={14} /> Tout Télécharger
                     </button>
@@ -227,44 +281,66 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
               ) : (
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
                   gap: '10px',
-                  maxHeight: '320px',
+                  maxHeight: '340px',
                   overflowY: 'auto'
                 }}>
                   {episodes.map((ep, idx) => {
-                    const epNum = ep.num || ep.title || idx + 1;
+                    const epNum = String(ep.num || ep.title || idx + 1);
                     const watched = isEpisodeWatched(currentSeasonName, epNum);
+                    const localInfo = downloadedEpisodes[epNum];
+                    const isDownloaded = Boolean(localInfo);
 
                     return (
                       <div
                         key={idx}
                         className="surface-card"
                         style={{
-                          padding: '10px',
+                          padding: '10px 12px',
                           borderRadius: 'var(--radius-sm)',
                           display: 'flex',
                           flexDirection: 'column',
                           gap: '8px',
-                          border: watched ? '1px solid rgba(46, 160, 67, 0.4)' : '1px solid var(--border-color)'
+                          border: watched
+                            ? '1px solid rgba(46, 160, 67, 0.4)'
+                            : isDownloaded
+                            ? '1px solid rgba(88, 166, 255, 0.3)'
+                            : '1px solid var(--border-color)',
+                          background: isDownloaded ? 'rgba(88, 166, 255, 0.04)' : undefined
                         }}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ fontSize: '0.85rem', fontWeight: 600, color: watched ? '#3FB950' : '#fff' }}>
                             {ep.title || `Épisode ${epNum}`}
                           </span>
-                          {watched && (
-                            <span className="badge badge-watched">✓ Vu</span>
-                          )}
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            {isDownloaded && (
+                              <span className="badge" style={{ background: 'rgba(56, 139, 253, 0.2)', color: '#58A6FF', fontSize: '0.68rem', padding: '2px 5px' }} title="Fichier disponible sur le disque">
+                                💾 Local
+                              </span>
+                            )}
+                            {watched && (
+                              <span className="badge badge-watched" style={{ fontSize: '0.68rem', padding: '2px 5px' }}>✓ Vu</span>
+                            )}
+                          </div>
                         </div>
 
                         <div style={{ display: 'flex', gap: '4px' }}>
                           <button
                             className="btn btn-primary"
                             style={{ flex: 1, padding: '4px 8px', fontSize: '0.78rem' }}
-                            onClick={() => onPlayEpisode(details?.title || anime.title, currentSeasonName, ep, episodes)}
+                            onClick={() => onPlayEpisode(
+                              animeTitle,
+                              currentSeasonName,
+                              ep,
+                              episodes,
+                              animeCover,
+                              0,
+                              localInfo?.file_path
+                            )}
                           >
-                            <Play size={12} fill="#fff" /> Lire
+                            <Play size={12} fill="#fff" /> {isDownloaded ? "Lire Local" : "Lire"}
                           </button>
                           <button
                             className={`btn ${watched ? 'btn-success' : 'btn-secondary'}`}
@@ -275,10 +351,10 @@ export default function AnimeDetailModal({ anime, onClose, onPlayEpisode, onDown
                             <Check size={14} />
                           </button>
                           <button
-                            className="btn btn-secondary btn-icon"
+                            className={`btn btn-icon ${isDownloaded ? 'btn-success' : 'btn-secondary'}`}
                             style={{ width: '28px', height: '28px' }}
-                            onClick={() => onDownloadEpisode(details?.title || anime.title, currentSeasonName, ep)}
-                            title="Télécharger"
+                            onClick={() => onDownloadEpisode(animeTitle, currentSeasonName, ep)}
+                            title={isDownloaded ? "Déjà téléchargé sur le disque (Re-télécharger)" : "Télécharger sur le disque"}
                           >
                             <Download size={12} />
                           </button>

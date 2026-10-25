@@ -2,28 +2,88 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
 import HistoryView from './components/HistoryView';
+import OfflineLibraryView from './components/OfflineLibraryView';
 import AnimeDetailModal from './components/AnimeDetailModal';
 import VideoPlayerModal from './components/VideoPlayerModal';
 import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
+import StatsModal from './components/StatsModal';
+import AuthModal from './components/AuthModal';
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState('all');
-  const [activeTab, setActiveTab] = useState('catalog');
+  const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' | 'history' | 'offline'
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Home Shelves State
+  const [continueWatching, setContinueWatching] = useState([]);
+  const [recentAnimes, setRecentAnimes] = useState([]);
+  const [randomSuggestions, setRandomSuggestions] = useState([]);
+
+  // User Authentication State
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('nami_active_user');
+      return saved ? JSON.parse(saved) : { id: 'default', username: 'Utilisateur', avatar: '👤' };
+    } catch {
+      return { id: 'default', username: 'Utilisateur', avatar: '👤' };
+    }
+  });
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
 
   // Modals & Drawers
   const [selectedAnime, setSelectedAnime] = useState(null);
   const [activePlayer, setActivePlayer] = useState(null);
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isStatsOpen, setIsStatsOpen] = useState(false);
 
   // Downloads state
   const [downloads, setDownloads] = useState([]);
 
-  // Load full catalog or search results
+  const userId = currentUser?.id || 'default';
+
+  // Save active user to localStorage when changed
+  const handleSelectUser = (user) => {
+    setCurrentUser(user);
+    try {
+      localStorage.setItem('nami_active_user', JSON.stringify(user));
+    } catch {}
+  };
+
+  // Fetch continue watching & recent items for current user
+  const loadUserShelves = useCallback(() => {
+    fetch('/api/history/continue', {
+      headers: { 'X-User-ID': userId }
+    })
+      .then((res) => res.json())
+      .then((data) => setContinueWatching(data.results || []))
+      .catch(() => {});
+
+    fetch('/api/catalog/recent', {
+      headers: { 'X-User-ID': userId }
+    })
+      .then((res) => res.json())
+      .then((data) => setRecentAnimes(data.results || []))
+      .catch(() => {});
+  }, [userId]);
+
+  // Fetch random discovery suggestions
+  const loadRandomSuggestions = useCallback(() => {
+    fetch('/api/catalog/random?count=12')
+      .then((res) => res.json())
+      .then((data) => setRandomSuggestions(data.results || []))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadUserShelves();
+    loadRandomSuggestions();
+  }, [loadUserShelves, loadRandomSuggestions]);
+
+  // Load catalog or search results
   const loadCatalog = useCallback((query = '', source = 'all') => {
     setIsLoading(true);
     const q = query.trim();
@@ -43,12 +103,11 @@ export default function App() {
     loadCatalog(searchQuery, activeSource);
   };
 
-  // Reload catalog when source filter changes
   useEffect(() => {
     loadCatalog(searchQuery, activeSource);
   }, [activeSource]);
 
-  // Poll downloads every 10s (not 2s)
+  // Poll downloads
   useEffect(() => {
     const fetchDownloads = () => {
       fetch('/api/downloads')
@@ -58,18 +117,37 @@ export default function App() {
     };
 
     fetchDownloads();
-    const interval = setInterval(fetchDownloads, 10000);
+    const interval = setInterval(fetchDownloads, 8000);
     return () => clearInterval(interval);
   }, []);
 
   const activeDownloadsCount = downloads.filter((d) => d.status === 'downloading' || d.status === 'queued').length;
 
-  const handlePlayEpisode = (animeTitle, season, episode, episodesList) => {
+  const handlePlayEpisode = (animeTitle, season, episode, episodesList, cover = '', initialTime = 0, initialFilePath = null) => {
     setActivePlayer({
       animeTitle,
+      cover,
       season,
       episode,
-      episodes: episodesList
+      episodes: episodesList,
+      initialTime,
+      initialFilePath
+    });
+  };
+
+  const handleResumeFromShelf = (item) => {
+    setActivePlayer({
+      animeTitle: item.anime_title,
+      cover: item.cover,
+      season: item.season,
+      episode: {
+        num: item.episode_num,
+        title: `Épisode ${item.episode_num}`,
+        embed_url: item.embed_url
+      },
+      episodes: [{ num: item.episode_num, title: `Épisode ${item.episode_num}`, embed_url: item.embed_url }],
+      initialTime: item.position_sec,
+      initialFilePath: item.file_path
     });
   };
 
@@ -119,7 +197,7 @@ export default function App() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-main)' }}>
       <Header
         searchQuery={searchQuery}
         setSearchQuery={setSearchQuery}
@@ -131,28 +209,51 @@ export default function App() {
         activeDownloadsCount={activeDownloadsCount}
         onOpenDownloads={() => setIsDownloadsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenStats={() => setIsStatsOpen(true)}
+        currentUser={currentUser}
+        onOpenAuth={() => setIsAuthOpen(true)}
       />
 
-      <main style={{ flex: 1, padding: '0 24px', maxWidth: '1400px', width: '100%', margin: '0 auto' }}>
+      <main style={{ flex: 1, padding: '0 24px', maxWidth: '1440px', width: '100%', margin: '0 auto' }}>
         {activeTab === 'catalog' ? (
           <CatalogGrid
             results={results}
             isLoading={isLoading}
+            searchQuery={searchQuery}
+            continueWatching={continueWatching}
+            recentAnimes={recentAnimes}
+            randomSuggestions={randomSuggestions}
+            onRollRandom={loadRandomSuggestions}
             onSelectAnime={(anime) => setSelectedAnime(anime)}
+            onResumeEpisode={handleResumeFromShelf}
+          />
+        ) : activeTab === 'history' ? (
+          <HistoryView
+            currentUser={currentUser}
+            onSelectAnime={(anime) => setSelectedAnime(anime)}
+            onPlayEpisode={(anime, season, ep, eps) => handlePlayEpisode(anime.title, season, ep, eps, anime.cover, 0)}
           />
         ) : (
-          <HistoryView
-            onSelectAnime={(anime) => setSelectedAnime(anime)}
-            onPlayEpisode={(anime, season, ep, eps) => handlePlayEpisode(anime.title, season, ep, eps)}
+          <OfflineLibraryView
+            onPlayEpisode={(title, season, ep, eps, cover, time, filePath) =>
+              handlePlayEpisode(title, season, ep, eps, cover, time, filePath)
+            }
           />
         )}
       </main>
 
       {selectedAnime && (
         <AnimeDetailModal
+          currentUser={currentUser}
           anime={selectedAnime}
-          onClose={() => setSelectedAnime(null)}
-          onPlayEpisode={(animeTitle, season, ep, eps) => handlePlayEpisode(animeTitle, season, ep, eps)}
+          onClose={() => {
+            setSelectedAnime(null);
+            loadUserShelves();
+          }}
+          onPlayEpisode={(animeTitle, season, ep, eps, cover, time, filePath) => {
+            handlePlayEpisode(animeTitle, season, ep, eps, cover, time, filePath);
+            loadUserShelves();
+          }}
           onDownloadEpisode={handleDownloadEpisode}
           onDownloadBulk={handleDownloadBulk}
         />
@@ -160,14 +261,21 @@ export default function App() {
 
       {activePlayer && (
         <VideoPlayerModal
+          currentUser={currentUser}
           animeTitle={activePlayer.animeTitle}
+          cover={activePlayer.cover}
           season={activePlayer.season}
           episode={activePlayer.episode}
           episodes={activePlayer.episodes}
-          onClose={() => setActivePlayer(null)}
+          initialTime={activePlayer.initialTime}
+          initialFilePath={activePlayer.initialFilePath}
+          onClose={() => {
+            setActivePlayer(null);
+            loadUserShelves();
+          }}
           onDownloadEpisode={handleDownloadEpisode}
           onSelectNextEpisode={(nextEp) => {
-            setActivePlayer((prev) => ({ ...prev, episode: nextEp }));
+            setActivePlayer((prev) => ({ ...prev, episode: nextEp, initialTime: 0, initialFilePath: null }));
           }}
         />
       )}
@@ -183,6 +291,19 @@ export default function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+      />
+
+      <StatsModal
+        isOpen={isStatsOpen}
+        onClose={() => setIsStatsOpen(false)}
+        currentUser={currentUser}
+      />
+
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        currentUser={currentUser}
+        onSelectUser={handleSelectUser}
       />
     </div>
   );

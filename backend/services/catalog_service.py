@@ -4,10 +4,11 @@ import json
 import re
 import asyncio
 import httpx
+from typing import Optional, List, Dict
+from backend.services.cache_service import cache_service
 
 AS_API_BASE = "http://127.0.0.1:5000"
 VA_API_BASE = "http://127.0.0.1:8000"
-
 
 class CatalogService:
     def __init__(self):
@@ -19,7 +20,6 @@ class CatalogService:
         if self._is_updating:
             return {"is_updating": True, "message": self._update_message, "source": "all"}
 
-        # Also check VoirAnime internal status
         try:
             resp = await self.client.get(f"{VA_API_BASE}/catalog/status", timeout=3.0)
             if resp.status_code == 200:
@@ -40,8 +40,6 @@ class CatalogService:
 
         self._is_updating = True
         self._update_message = "Mise à jour démarrée..."
-
-        # Launch background task
         asyncio.create_task(self._run_update(source))
         return {"is_updating": True, "message": "Mise à jour du catalogue démarrée en arrière-plan."}
 
@@ -50,25 +48,20 @@ class CatalogService:
             if source in ["all", "anime_sama"]:
                 self._update_message = "Mise à jour Anime-Sama en cours..."
                 try:
-                    print("[CatalogService] Triggering AnimeSama catalog update via http://127.0.0.1:5000/api/getAllAnime?r=True")
                     await self.client.get(f"{AS_API_BASE}/api/getAllAnime?r=True", timeout=300.0)
-                    print("[CatalogService] AnimeSama catalog update complete.")
                 except Exception as e:
                     print(f"[CatalogService] AnimeSama update error: {e}")
 
             if source in ["all", "voiranime"]:
                 self._update_message = "Mise à jour VoirAnime en cours..."
                 try:
-                    print("[CatalogService] Triggering VoirAnime catalog update via http://127.0.0.1:8000/catalog/update")
                     await self.client.get(f"{VA_API_BASE}/catalog/update", timeout=300.0)
-                    print("[CatalogService] VoirAnime catalog update complete.")
                 except Exception as e:
                     print(f"[CatalogService] VoirAnime update error: {e}")
 
             self._update_message = "Catalogue à jour !"
         except Exception as e:
             self._update_message = f"Erreur: {e}"
-            print(f"[CatalogService] General update error: {e}")
         finally:
             self._is_updating = False
 
@@ -87,6 +80,10 @@ class CatalogService:
                 if isinstance(res, list):
                     results.extend(res)
 
+        # Fallback to starter/popular recommendations if search is empty and no results found
+        if not results and not query.strip():
+            return cache_service.get_random_animes(count=24)
+
         return results
 
     async def _search_anime_sama(self, query: str = "") -> list:
@@ -101,32 +98,38 @@ class CatalogService:
                         for item in data:
                             title = item.get("title", "")
                             link = item.get("lien", item.get("link", ""))
+                            cover = item.get("cover", "")
+                            if not cover:
+                                slug = link.rstrip("/").split("/")[-1]
+                                cover = f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg"
                             if title and link:
                                 results.append({
                                     "id": f"as:{link}",
                                     "title": title,
                                     "source": "anime_sama",
                                     "url": link,
-                                    "cover": ""
+                                    "cover": cover
                                 })
             else:
                 resp = await self.client.get(f"{AS_API_BASE}/api/loadBaseAnimeData")
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list):
-                        for item in data[:500]:
+                        for item in data[:300]:
                             title = item.get("title", "")
                             link = item.get("link", "")
+                            slug = link.rstrip("/").split("/")[-1]
+                            cover = f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg"
                             if title and link:
                                 results.append({
                                     "id": f"as:{link}",
                                     "title": title,
                                     "source": "anime_sama",
                                     "url": link,
-                                    "cover": ""
+                                    "cover": cover
                                 })
         except Exception as e:
-            print(f"[CatalogService] Error querying AnimeSama API (5000): {e}")
+            print(f"[CatalogService] Error querying AnimeSama API: {e}")
 
         return results
 
@@ -167,38 +170,56 @@ class CatalogService:
                                 "cover": ""
                             })
                             count += 1
-                            if count >= 500:
+                            if count >= 300:
                                 break
         except Exception as e:
-            print(f"[CatalogService] Error querying VoirAnime API (8000): {e}")
+            print(f"[CatalogService] Error querying VoirAnime API: {e}")
 
         return results
 
-    async def get_details(self, url: str, source: str) -> dict:
+    async def get_details(self, url: str, source: str, refresh: bool = False, user_id: str = "default") -> dict:
+        cache_key = f"{source}:{url}"
+        if not refresh:
+            cached = cache_service.get_anime_details(source, cache_key)
+            if cached:
+                cache_service.add_recent_anime(user_id, cached)
+                return cached
+
+        res = {}
         if source == "anime_sama":
-            return await self._get_details_anime_sama(url)
+            res = await self._get_details_anime_sama(url)
         elif source == "voiranime":
-            return await self._get_details_voiranime(url)
-        return {}
+            res = await self._get_details_voiranime(url)
+
+        if res and res.get("title"):
+            cache_service.save_anime_details(source, cache_key, res)
+            cache_service.add_recent_anime(user_id, res)
+
+        return res
 
     async def _get_details_anime_sama(self, url: str) -> dict:
+        slug = url.rstrip("/").split("/")[-1]
+        default_cover = f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg"
         try:
-            title = url.rstrip("/").split("/")[-1].replace("-", " ")
+            title = slug.replace("-", " ")
             resp = await self.client.get(f"{AS_API_BASE}/api/getInfoAnime", params={"q": title})
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
                     anime_name = data[0].get("title", title)
+                    cover = data[0].get("cover", default_cover)
                     seasons = []
                     for item in data:
+                        s_name = item.get("Saison", "Saison 1")
                         seasons.append({
-                            "name": item.get("Saison", "Saison 1"),
+                            "name": s_name,
                             "url": item.get("url", url),
                             "raw_link": item.get("url", url)
                         })
                     return {
                         "title": anime_name,
-                        "cover": "",
+                        "url": url,
+                        "cover": cover,
                         "synopsis": "",
                         "source": "anime_sama",
                         "seasons": seasons
@@ -206,7 +227,13 @@ class CatalogService:
         except Exception as e:
             print(f"[CatalogService] Error fetching AnimeSama details: {e}")
 
-        return {"title": url.rstrip("/").split("/")[-1], "source": "anime_sama", "seasons": [{"name": "Saison 1", "url": url}]}
+        return {
+            "title": slug.title(),
+            "url": url,
+            "cover": default_cover,
+            "source": "anime_sama",
+            "seasons": [{"name": "Saison 1", "url": url}]
+        }
 
     async def _get_details_voiranime(self, url: str) -> dict:
         try:
@@ -217,6 +244,7 @@ class CatalogService:
                 title = url.rstrip("/").split("/")[-1].replace("-", " ").title()
                 return {
                     "title": title,
+                    "url": url,
                     "cover": "",
                     "synopsis": "",
                     "source": "voiranime",
@@ -225,9 +253,15 @@ class CatalogService:
         except Exception as e:
             print(f"[CatalogService] Error fetching VoirAnime details: {e}")
 
-        return {"title": "Anime", "source": "voiranime", "episodes": []}
+        return {"title": "Anime", "url": url, "source": "voiranime", "episodes": []}
 
-    async def fetch_anime_sama_episodes(self, season_url: str) -> list:
+    async def fetch_anime_sama_episodes(self, season_url: str, refresh: bool = False) -> list:
+        cache_key = f"as_eps:{season_url}"
+        if not refresh:
+            cached = cache_service.get_anime_details("anime_sama_eps", cache_key)
+            if cached and isinstance(cached, list) and len(cached) > 0:
+                return cached
+
         episodes = []
         try:
             resp = await self.client.get(f"{AS_API_BASE}/api/getAnimeLink", params={"q": season_url}, timeout=30.0)
@@ -242,6 +276,8 @@ class CatalogService:
                                 "title": f"Épisode {idx}",
                                 "embed_url": embed_url
                             })
+                    if episodes:
+                        cache_service.save_anime_details("anime_sama_eps", cache_key, episodes)
         except Exception as e:
             print(f"[CatalogService] Error fetching AS season episodes: {e}")
         return episodes
@@ -265,6 +301,5 @@ class CatalogService:
             pass
 
         return result
-
 
 catalog_service = CatalogService()

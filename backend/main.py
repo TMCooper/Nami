@@ -1,65 +1,132 @@
 import os
 import sys
-import subprocess
+import time
 import asyncio
+import subprocess
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from backend.services.update_service import update_service, ANIME_SAMA_PATH, VOIRANIME_PATH
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ANIME_SAMA_PATH = os.path.join(PROJECT_ROOT, "AnimeSamaApi")
-VOIRANIME_PATH = os.path.join(PROJECT_ROOT, "voiranime_API")
 
-procs = []
+_submodule_processes = {}
 
+def _start_submodules():
+    """Launch AnimeSama and VoirAnime APIs as isolated background subprocesses."""
+    global _submodule_processes
 
-def _launch_subprocess(name, cwd, cmd):
-    """Launch a subprocess and return the process handle."""
-    main_file = os.path.join(cwd, cmd[-1])
-    if not os.path.exists(main_file):
-        print(f"[Nami] WARNING: {main_file} not found. Skipping {name}.")
-        return None
+    # 1. Ensure AnimeSamaApi is cloned
+    if not os.path.exists(ANIME_SAMA_PATH):
+        print("[Nami] AnimeSamaApi not detected. Auto-cloning from GitHub...")
+        update_service.ensure_cloned("https://github.com/TMCooper/AnimeSamaApi.git", ANIME_SAMA_PATH)
+
+    # 2. Ensure VoirAnime_API is cloned
+    if not os.path.exists(VOIRANIME_PATH):
+        print("[Nami] VoirAnime_API not detected. Auto-cloning from GitHub...")
+        update_service.ensure_cloned("https://github.com/TMCooper/voiranime_API.git", VOIRANIME_PATH)
+
+    # Launch AnimeSama API (Flask on 5000)
     try:
-        print(f"[Nami] Launching {name} (cwd={cwd})...")
-        p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        return p
+        p_as = subprocess.Popen(
+            [sys.executable, "main.py"],
+            cwd=ANIME_SAMA_PATH,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        _submodule_processes["animesama"] = p_as
+        print("[Nami] AnimeSama API process launched on port 5000.")
     except Exception as e:
-        print(f"[Nami] Error launching {name}: {e}")
-        return None
+        print(f"[Nami] Error launching AnimeSama process: {e}")
+
+    # Launch VoirAnime API (Uvicorn on 8000)
+    try:
+        p_va = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "8000", "--log-level", "warning"],
+            cwd=VOIRANIME_PATH,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        _submodule_processes["voiranime"] = p_va
+        print("[Nami] VoirAnime API process launched on port 8000.")
+    except Exception as e:
+        print(f"[Nami] Error launching VoirAnime process: {e}")
+
+def restart_submodule(name: str):
+    """Gracefully terminates and restarts a specific API process."""
+    global _submodule_processes
+    old_proc = _submodule_processes.get(name)
+    if old_proc:
+        try:
+            old_proc.terminate()
+            old_proc.wait(timeout=3)
+        except Exception:
+            try:
+                old_proc.kill()
+            except Exception:
+                pass
+
+    if name == "animesama" and os.path.exists(ANIME_SAMA_PATH):
+        p_as = subprocess.Popen(
+            [sys.executable, "main.py"],
+            cwd=ANIME_SAMA_PATH,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        _submodule_processes["animesama"] = p_as
+        print("[Nami] AnimeSama API process restarted.")
+
+    elif name == "voiranime" and os.path.exists(VOIRANIME_PATH):
+        p_va = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "8000", "--log-level", "warning"],
+            cwd=VOIRANIME_PATH,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        _submodule_processes["voiranime"] = p_va
+        print("[Nami] VoirAnime API process restarted.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Launch AnimeSama API (Flask on http://127.0.0.1:5000)
-    p_as = _launch_subprocess(
-        "AnimeSama API (port 5000)",
-        ANIME_SAMA_PATH,
-        [sys.executable, "main.py"]
-    )
-    if p_as:
-        procs.append(p_as)
+    _start_submodules()
 
-    # Launch VoirAnime API (FastAPI on http://127.0.0.1:8000)
-    p_va = _launch_subprocess(
-        "VoirAnime API (port 8000)",
-        VOIRANIME_PATH,
-        [sys.executable, "main.py"]
-    )
-    if p_va:
-        procs.append(p_va)
+    # Wait for APIs to be ready
+    client = httpx.Client(timeout=2.0)
+    
+    for i in range(30):
+        try:
+            r1 = client.get("http://127.0.0.1:5000/status")
+            if r1.status_code == 200:
+                print("[Nami] AnimeSama API ready on port 5000")
+                break
+        except:
+            pass
+        time.sleep(0.5)
+    
+    for i in range(30):
+        try:
+            r2 = client.get("http://127.0.0.1:8000/status")
+            if r2.status_code == 200:
+                print("[Nami] VoirAnime API ready on port 8000")
+                break
+        except:
+            pass
+        time.sleep(0.5)
+    
+    client.close()
+    print("[Nami] All submodule APIs launched and ready.")
 
-    # Give submodule APIs time to bind to ports
-    await asyncio.sleep(3)
-    print(f"[Nami] Submodule APIs launched. AnimeSama=5000, VoirAnime=8000")
     yield
 
-    # Clean up subprocesses on shutdown
-    for p in procs:
+    # Cleanup subprocesses on shutdown
+    for proc in _submodule_processes.values():
         try:
-            p.terminate()
-            p.wait(timeout=5)
+            proc.terminate()
         except Exception:
             pass
 

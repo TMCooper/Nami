@@ -26,6 +26,7 @@ from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.aliases import AliasIndex
 from backend.yoitsu.anilist import AniListClient, media_titles
 from backend.yoitsu.index import Entry, EntityIndex, build_entity, entity_id, entry_rank, key_from_entity_id
+from backend.yoitsu.wrapper_store import with_wrapper_links, wrapper_store
 from backend.yoitsu.normalize import (
     franchise_of, is_valid_key, legacy_title_from_url, season_key, slug_of, split_version, strong_root, title_key
 )
@@ -98,6 +99,7 @@ class YoitsuGateway:
         self._flush_task: Optional[asyncio.Task] = None
         self._vf_probe: dict = {}
         self._probe_semaphore = asyncio.Semaphore(3)
+        self.wrapper = wrapper_store
 
     # --- plumbing ---
     def _spawn(self, coro) -> asyncio.Task:
@@ -134,6 +136,7 @@ class YoitsuGateway:
             await self._client.aclose()
             self._client = None
         await self.anilist.close()
+        self.wrapper.close()
 
     # --- YoitsuWrap contract ---
     async def get_info(self, source: str, title: str) -> list:
@@ -845,8 +848,38 @@ class YoitsuGateway:
         else:
             va = await catalog_service.get_details(url=variant["url"], source="voiranime", refresh=refresh, track_recent=False)
             episodes = va.get("episodes", []) if va else []
+
+        # YoitsuWrap builds the anime once (background); its verified links come first, the API players behind
+        job = await self._wrapper_job(details)
+        if job and ":" not in season_obj["key"]:
+            key, query, allowed, order, primary = job
+            version = variant["version"]
+            result["wrapper"] = self.wrapper.ensure(key, version, query, allowed, order, force=refresh)
+            snap = self.wrapper.get(key, version)
+            if self.wrapper.is_fresh(snap) and variant["source"] == primary:
+                wanted = next((s for s in snap["seasons"] if s.get("key") == season_obj["key"]), None)
+                episodes = with_wrapper_links(episodes, wanted)
         result["episodes"] = episodes
         return result
+
+    async def _wrapper_job(self, details: dict) -> Optional[tuple]:
+        """What YoitsuWrap is asked for an entity: its Anime-Sama title first (else VoirAnime's), with
+        the page slugs of each API that belong to this entity (fuzzy matches on another work are refused)."""
+        sources = {s.get("source"): s for s in details.get("sources") or []}
+        primary = "anime_sama" if "anime_sama" in sources else "voiranime" if "voiranime" in sources else None
+        if not primary or not sources[primary].get("title"):
+            return None
+        allowed: Dict[str, set] = {"ANIMESAMA": set(), "VOIRANIME": set()}
+        for ident in await self.entry_idents(details):
+            source, _, slug = ident.partition(":")
+            name = "ANIMESAMA" if source == "anime_sama" else "VOIRANIME" if source == "voiranime" else None
+            if name and slug:
+                allowed[name].add(slug)
+        order = ["ANIMESAMA", "VOIRANIME"] if primary == "anime_sama" else ["VOIRANIME", "ANIMESAMA"]
+        return key_from_entity_id(details["id"]), sources[primary]["title"], allowed, order, primary
+
+    def wrapper_status(self, eid: str, version: str = "vostfr") -> dict:
+        return self.wrapper.status(self.aliases.find(key_from_entity_id(eid)), version)
 
     async def players(self, url: str) -> list:
         if not self.valid_entry("voiranime", url):

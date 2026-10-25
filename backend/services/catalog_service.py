@@ -1043,6 +1043,17 @@ class CatalogService:
 
         target_embed = embed_url
 
+        # Already a stream (YoitsuWrap gives resolved, yt-dlp checked hls/mp4 links): nothing to resolve
+        try:
+            parsed = urlparse(embed_url)
+            direct = parsed.path.lower()
+            host = parsed.hostname
+        except ValueError:
+            return result
+        if embed_url.startswith(("http://", "https://")) and direct.endswith((".m3u8", ".mp4")):
+            result.update(stream_url=embed_url, stream_type="m3u8" if direct.endswith(".m3u8") else "mp4", host=host)
+            return result
+
         # Special handling for VoirAnime: episode URL is a webpage, extract the real video player iframe!
         if "voir-anime.to" in target_embed or source == "voiranime":
             players = await self.extract_voiranime_players(target_embed)

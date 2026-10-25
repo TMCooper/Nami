@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen } from 'lucide-react';
+import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen, ShieldCheck } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
 import WatchlistButton from './WatchlistButton';
 import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
 import { findHistoryEntries } from '../utils/titles';
-import { animeRef } from '../utils/animes';
+import { animeRef, formatRelativeDate } from '../utils/animes';
 
 const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
 const VERSION_LABELS = { vostfr: 'VOSTFR', vf: 'VF' };
@@ -33,6 +33,8 @@ export default function AnimeDetailModal({
   const [readingChapter, setReadingChapter] = useState(null);
   const [downloadingScan, setDownloadingScan] = useState(null);
   const [synopsisOpen, setSynopsisOpen] = useState(false);
+  // YoitsuWrap build of this anime: { state: none|queued|running|ready|expired|failed, built_at, ... }
+  const [wrapperStatus, setWrapperStatus] = useState(null);
 
   const userId = currentUser?.id || 'default';
 
@@ -90,13 +92,17 @@ export default function AnimeDetailModal({
     loadAnimeDetails(false);
   }, [anime, userId]);
 
-  const selectSeason = (data, season, source, version, forceRefresh = false) => {
+  // quiet: same season reloaded in place (YoitsuWrap links just became ready), no spinner
+  const selectSeason = (data, season, source, version, forceRefresh = false, quiet = false) => {
     // A slow response of an earlier tap must not land under the tab clicked last
     const request = ++seasonRequestRef.current;
     const isLatest = () => request === seasonRequestRef.current;
     setSelectedSeasonKey(season.key);
-    setIsLoadingEpisodes(true);
-    setEpisodes([]);
+    if (!quiet) {
+      setIsLoadingEpisodes(true);
+      setEpisodes([]);
+      setWrapperStatus(null);
+    }
 
     if (season.is_scans) {
       // Manga scans keep using YoitsuWrap Scan objects through /api/episodes
@@ -122,11 +128,37 @@ export default function AnimeDetailModal({
         setEpisodes(res.episodes || []);
         // The season key travels with the variant of the same response: history writes pair them
         setActiveVariant(res.variant ? { ...res.variant, season_key: res.season?.key || season.key } : null);
-        if (res.variant) checkDownloadedStatus(res.variant.history_title, res.variant.season_name);
+        setWrapperStatus(res.wrapper || null);
+        if (res.variant && !quiet) checkDownloadedStatus(res.variant.history_title, res.variant.season_name);
       })
       .catch((err) => console.error("Error loading episodes:", err))
       .finally(() => { if (isLatest()) setIsLoadingEpisodes(false); });
   };
+
+  // While YoitsuWrap builds the anime (about a minute), check back; once ready, the list gets its verified links
+  const wrapperState = wrapperStatus?.state;
+  useEffect(() => {
+    if (!details?.id || !activeVariant || !['queued', 'running'].includes(wrapperState)) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetch(`/api/anime/${encodeURIComponent(details.id)}/wrapper?version=${activeVariant.version}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((status) => {
+          if (cancelled || !status) return;
+          const season = details.seasons?.find((s) => s.key === activeVariant.season_key);
+          if (status.state === 'ready' && season) {
+            selectSeason(details, season, activeVariant.source, activeVariant.version, false, true);
+          } else {
+            setWrapperStatus(status);
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [details, activeVariant, wrapperStatus]);
 
   const checkDownloadedStatus = (title, seasonName) => {
     if (!title) return;
@@ -445,6 +477,21 @@ export default function AnimeDetailModal({
                         </button>
                       ))}
                     </div>
+                  )}
+
+                  {/* Links verified by YoitsuWrap: built once, rebuilt when they expire or with « Actualiser » */}
+                  {selectedSeason && !isScanMode && wrapperState && wrapperState !== 'none' && (
+                    <p style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: wrapperState === 'ready' ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                      {['queued', 'running'].includes(wrapperState) ? (
+                        <><Loader2 className="animate-spin" size={13} /> YoitsuWrap vérifie les liens de cet anime… (les lecteurs des sources restent disponibles)</>
+                      ) : wrapperState === 'ready' ? (
+                        <><ShieldCheck size={14} /> Liens vérifiés par YoitsuWrap {formatRelativeDate(wrapperStatus.built_at).toLowerCase()}</>
+                      ) : wrapperState === 'expired' ? (
+                        <><RotateCw size={13} /> Liens YoitsuWrap expirés : nouvelle vérification au prochain chargement</>
+                      ) : (
+                        <>Vérification YoitsuWrap indisponible : lecteurs des sources utilisés</>
+                      )}
+                    </p>
                   )}
 
                   {/* Version & source selectors of the selected season */}

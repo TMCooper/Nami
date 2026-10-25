@@ -242,7 +242,8 @@ export default function VideoPlayerModal({
     }
 
     let cancelled = false; // a newer episode / player choice supersedes this resolution
-    const embedUrl = selectedEmbed || episode.embed_url || episode.url;
+    // The first player is the best one: a YoitsuWrap-verified link when the anime was built, else the source's best host
+    const embedUrl = selectedEmbed || episode.players?.[0]?.embed_url || episode.embed_url || episode.url;
     if (embedUrl && activeSourceType !== 'local') {
       triedEmbedsRef.current.add(embedUrl);
       fetch(`/api/resolve?embed_url=${encodeURIComponent(embedUrl)}`)
@@ -663,7 +664,9 @@ export default function VideoPlayerModal({
   // Identity of the episode on screen: every position sample carries the one it was taken for
   useLayoutEffect(() => {
     const episodeUrl = episode?.embed_url || episode?.url || '';
-    const playing = playingEmbedRef.current?.key === episodeKey ? playingEmbedRef.current.embed : '';
+    const streamed = playingEmbedRef.current?.key === episodeKey ? playingEmbedRef.current.embed : '';
+    // A YoitsuWrap link is signed and expires: history keeps the source's own player instead
+    const playing = (episode?.players || []).some((p) => p.verified && p.embed_url === streamed) ? '' : streamed;
     identityRef.current = {
       userId,
       animeTitle,

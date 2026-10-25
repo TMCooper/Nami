@@ -349,6 +349,13 @@ async def get_anime_entity(
         print(f"[History] Linking from details failed: {e}")
     return details
 
+@router.get("/anime/{entity_id}/wrapper")
+async def get_anime_wrapper_status(entity_id: str, version: str = Query("vostfr", pattern="^(vostfr|vf)$")):
+    # State of the YoitsuWrap build of this anime (started by its episodes): none, queued, running, ready, expired, failed
+    if not entity_id.startswith("a-"):
+        raise HTTPException(status_code=404, detail="Anime introuvable.")
+    return yoitsu_gateway.wrapper_status(entity_id, version)
+
 @router.get("/anime/{entity_id}/preview")
 async def get_anime_preview(entity_id: str, title: str = Query("", max_length=300, description="Titre de la carte")):
     # Hover previews: caches only, so hovering a grid never scrapes nor fills the recents

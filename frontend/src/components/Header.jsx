@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Download, Settings, RefreshCw, Layers, History, BarChart3, HardDrive } from 'lucide-react';
+import { Search, Download, Settings, RefreshCw, Layers, History, BarChart3, HardDrive, Bookmark } from 'lucide-react';
 
 export default function Header({ 
   searchQuery, 
@@ -9,8 +9,9 @@ export default function Header({
   setActiveSource, 
   activeTab,
   setActiveTab,
-  activeDownloadsCount, 
-  onOpenDownloads, 
+  activeDownloadsCount,
+  watchlistCount,
+  onOpenDownloads,
   onOpenSettings,
   onOpenStats,
   currentUser,
@@ -216,7 +217,7 @@ export default function Header({
       {/* Bottom Row: Navigation Tabs & Source Selector */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.04)', flexWrap: 'wrap', gap: '8px' }}>
         {/* Nav Tabs */}
-        <div style={{ display: 'flex', gap: '6px' }}>
+        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           <button
             className={`btn ${activeTab === 'catalog' ? 'btn-primary' : 'btn-secondary'}`}
             style={{ padding: '4px 12px', fontSize: '0.8rem' }}
@@ -231,6 +232,27 @@ export default function Header({
             onClick={() => setActiveTab('history')}
           >
             <History size={13} /> Historique & Reprise
+          </button>
+
+          <button
+            className={`btn ${activeTab === 'watchlist' ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+            onClick={() => setActiveTab('watchlist')}
+          >
+            <Bookmark size={13} /> À regarder plus tard
+            {watchlistCount > 0 && (
+              <span style={{
+                background: activeTab === 'watchlist' ? 'rgba(255,255,255,0.25)' : 'var(--primary)',
+                color: '#fff',
+                fontSize: '0.68rem',
+                fontWeight: 800,
+                padding: '1px 5px',
+                borderRadius: 'var(--radius-full)',
+                marginLeft: '4px'
+              }}>
+                {watchlistCount}
+              </span>
+            )}
           </button>
 
           <button

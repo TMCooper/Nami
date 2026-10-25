@@ -18,9 +18,17 @@ def normalize_title_key(title: str) -> str:
     return re.sub(r"[\W_]+", " ", t).strip()
 
 
+def url_host(url: str):
+    """Lower-cased host of a URL; None when it does not parse ('https://[bad': unbalanced IPv6 brackets)."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return None
+
+
 def raw_cover_url(cover: str) -> str:
     """Returns the upstream URL behind a cover value (strips Nami proxy wrappers, fixes percent-encoded values)."""
-    value = (cover or "").strip()
+    value = cover.strip() if isinstance(cover, str) else ""
     for prefix in LEGACY_PROXY_PREFIXES:
         if value.startswith(prefix):
             value = unquote(value[len(prefix):])
@@ -39,7 +47,9 @@ def is_usable_cover(cover: str) -> bool:
     raw = raw_cover_url(cover)
     if is_placeholder_cover(raw):
         return False
-    return raw.startswith(("http://", "https://", "/api/stream/local"))
+    if raw.startswith(("http://", "https://")):
+        return url_host(raw) is not None  # an unparsable URL is never stored: every read would fail on it
+    return raw.startswith("/api/stream/local")
 
 
 def is_trusted_cover(cover: str, source: str) -> bool:
@@ -47,8 +57,8 @@ def is_trusted_cover(cover: str, source: str) -> bool:
     if source != "voiranime":
         return True
     raw = raw_cover_url(cover)
-    host = (urlparse(raw).hostname or "").lower()
-    return "anime-sama" not in host and "/anime-sama/img/" not in raw.lower()
+    host = url_host(raw)
+    return host is not None and "anime-sama" not in host and "/anime-sama/img/" not in raw.lower()
 
 
 def client_cover_url(cover: str) -> str:
@@ -58,7 +68,9 @@ def client_cover_url(cover: str) -> str:
         return ""
     if raw.startswith("/api/"):
         return raw
-    host = (urlparse(raw).hostname or "").lower()
+    host = url_host(raw)
+    if host is None:
+        return ""
     if host in DIRECT_IMAGE_HOSTS:
         return raw
     return f"{IMAGE_ROUTE}{quote(raw, safe='')}"

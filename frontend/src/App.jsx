@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
 import HistoryView from './components/HistoryView';
+import WatchlistView from './components/WatchlistView';
 import OfflineLibraryView from './components/OfflineLibraryView';
 import AnimeDetailModal from './components/AnimeDetailModal';
 import VideoPlayerModal from './components/VideoPlayerModal';
@@ -9,12 +10,15 @@ import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
 import StatsModal from './components/StatsModal';
 import AuthModal from './components/AuthModal';
-import { normalizeTitle, titleKey } from './utils/titles';
+import { normalizeTitle } from './utils/titles';
+import { animeKeys, sameAnime, watchlistPayload } from './utils/animes';
+
+const RESTORE_WINDOW_MS = 60000; // a re-add this soon after a removal is an undo: the anime keeps its place
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState('all');
-  const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' | 'history' | 'offline'
+  const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' | 'history' | 'watchlist' | 'offline'
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -22,6 +26,19 @@ export default function App() {
   const [continueWatching, setContinueWatching] = useState([]);
   const [recentAnimes, setRecentAnimes] = useState([]);
   const [randomSuggestions, setRandomSuggestions] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
+  const [resumingKey, setResumingKey] = useState(null); // continue card waiting for its season list
+  const [notice, setNotice] = useState('');
+
+  const watchlistRef = useRef([]);
+  watchlistRef.current = watchlist;
+  // Only the latest request of a kind may set its state (profile switches, fast taps)
+  const shelvesRequestRef = useRef(0);
+  const watchlistRequestRef = useRef(0);
+  const removedRef = useRef(new Map()); // identity key -> { addedAt, removedAt }: an undone removal keeps its place
+  const confirmedRef = useRef([]); // last list the server returned: what a failed toggle reverts to
+  const resumeTokenRef = useRef(0); // bumped by every newer action: a slow resume then gives up
+  const noticeTimerRef = useRef(null);
 
   // User Authentication State
   const [currentUser, setCurrentUser] = useState(() => {
@@ -46,6 +63,8 @@ export default function App() {
 
   // Same fallback id as the modals and the backend, so shelves read the bucket the player writes to
   const userId = currentUser?.id || 'default';
+  const userIdRef = useRef(userId);
+  userIdRef.current = userId;
 
   // Save active user to localStorage when changed
   const handleSelectUser = (user) => {
@@ -77,22 +96,58 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Fetch continue watching & recent items for current user
+  const showNotice = (text) => {
+    setNotice(text);
+    clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setNotice(''), 4000);
+  };
+
+  // Any successful response is a server state of that profile, even when a newer request supersedes it
+  const confirmWatchlist = (profile, list) => {
+    if (profile === userIdRef.current) confirmedRef.current = list;
+  };
+
+  const loadWatchlist = useCallback(() => {
+    const request = ++watchlistRequestRef.current;
+    const profile = userId;
+    fetch('/api/watchlist', {
+      headers: { 'X-User-ID': profile }
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        confirmWatchlist(profile, data.results || []);
+        if (request === watchlistRequestRef.current) setWatchlist(data.results || []);
+      })
+      .catch(() => {});
+  }, [userId]);
+
+  // Fetch continue watching, recent items & watchlist for current user
   const loadUserShelves = useCallback(() => {
-    fetch('/api/history/continue', {
+    const request = ++shelvesRequestRef.current;
+    // Not only the home shelf (8 cards): the watchlist tab finds each item's resume card in this list
+    fetch('/api/history/continue?limit=100', {
       headers: { 'X-User-ID': userId }
     })
       .then((res) => res.json())
-      .then((data) => setContinueWatching(data.results || []))
+      .then((data) => {
+        if (request === shelvesRequestRef.current) setContinueWatching(data.results || []);
+      })
       .catch(() => {});
 
     fetch('/api/catalog/recent', {
       headers: { 'X-User-ID': userId }
     })
       .then((res) => res.json())
-      .then((data) => setRecentAnimes(data.results || []))
+      .then((data) => {
+        if (request === shelvesRequestRef.current) setRecentAnimes(data.results || []);
+      })
       .catch(() => {});
-  }, [userId]);
+
+    loadWatchlist();
+  }, [userId, loadWatchlist]);
 
   // Fetch random discovery suggestions
   const loadRandomSuggestions = useCallback(() => {
@@ -102,10 +157,71 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // The previous profile's shelves disappear at once, not when the new responses arrive
+  useEffect(() => {
+    setContinueWatching([]);
+    setRecentAnimes([]);
+    setWatchlist([]);
+    confirmedRef.current = [];
+    removedRef.current.clear();
+    resumeTokenRef.current += 1; // a pending resume belongs to the previous profile
+    setResumingKey(null);
+  }, [userId]);
+
   useEffect(() => {
     loadUserShelves();
     loadRandomSuggestions();
   }, [loadUserShelves, loadRandomSuggestions]);
+
+  // O(1) per card: one URL parse per card per render
+  const watchlistKeys = useMemo(() => new Set(watchlist.flatMap(animeKeys)), [watchlist]);
+  const isInWatchlist = useCallback((anime) => animeKeys(anime).some((k) => watchlistKeys.has(k)), [watchlistKeys]);
+
+  // Optimistic: the latest request wins; a failure reverts to the server's last list, then resyncs.
+  // restore: the re-add of a ghost in the watchlist tab (an undone removal).
+  const handleToggleWatchlist = (anime, { restore = false } = {}) => {
+    const previous = watchlistRef.current;
+    const saved = previous.find((w) => sameAnime(w, anime));
+    const request = ++watchlistRequestRef.current;
+    const profile = userId;
+    let call;
+    if (saved) {
+      const removed = { addedAt: saved.added_at, removedAt: Date.now() };
+      animeKeys(saved).forEach((k) => removedRef.current.set(k, removed));
+      setWatchlist(previous.filter((w) => !sameAnime(w, anime)));
+      const params = new URLSearchParams({ id: saved.id || '', source: saved.source || '', url: saved.url || '' });
+      call = fetch(`/api/watchlist?${params}`, { method: 'DELETE', headers: { 'X-User-ID': userId } });
+    } else {
+      // An undo (ghost tap, or a re-add within a minute) keeps the old place; a later re-add is a new add
+      const removed = animeKeys(anime).map((k) => removedRef.current.get(k)).find(Boolean);
+      const undo = removed && (restore || Date.now() - removed.removedAt < RESTORE_WINDOW_MS);
+      const addedAt = (undo && removed.addedAt) || null;
+      const optimistic = [{ ...anime, added_at: addedAt || Date.now() / 1000 }, ...previous].sort((a, b) => b.added_at - a.added_at);
+      setWatchlist(optimistic);
+      call = fetch('/api/watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-ID': userId },
+        body: JSON.stringify({ user_id: userId, anime: watchlistPayload(anime), added_at: addedAt })
+      });
+    }
+    call
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        confirmWatchlist(profile, data.results || []);
+        if (request === watchlistRequestRef.current) setWatchlist(data.results || []);
+      })
+      .catch(() => {
+        // Not the previous optimistic list: an earlier toggle in it may have failed too
+        if (request === watchlistRequestRef.current) {
+          setWatchlist(confirmedRef.current);
+          loadWatchlist();
+        }
+        showNotice('Impossible de mettre à jour la liste.');
+      });
+  };
 
   // Load catalog or search results
   const loadCatalog = useCallback((query = '', source = 'all') => {
@@ -147,7 +263,9 @@ export default function App() {
 
   const activeDownloadsCount = downloads.filter((d) => d.status === 'downloading' || d.status === 'queued').length;
 
-  const handlePlayEpisode = (animeTitle, season, episode, episodesList, cover = '', initialTime = 0, initialFilePath = null) => {
+  // context: the play context (entity, season variant, history keys) when the caller knows it
+  const handlePlayEpisode = (animeTitle, season, episode, episodesList, cover = '', initialTime = 0, initialFilePath = null, context = null) => {
+    resumeTokenRef.current += 1; // a pending shelf resume must not replace this player
     setActivePlayer({
       animeTitle,
       cover,
@@ -155,13 +273,16 @@ export default function App() {
       episode,
       episodes: episodesList,
       initialTime,
-      initialFilePath
+      initialFilePath,
+      autoResume: false,
+      context,
+      fallbackPlayers: null
     });
   };
 
   // History entries only store a title: find the matching catalogue entry (recents first, then search).
-  // strict: only an exact (normalized) title match, never "the best search hit".
-  const findAnimeByTitle = async (title, { strict = false } = {}) => {
+  // Only an exact (normalized) title match, never "the best search hit".
+  const findAnimeByTitle = async (title) => {
     const wanted = normalizeTitle(title);
     // Entities carry every known name of the anime (other sources, alternative titles)
     const sameTitle = (a) => [a.title, ...(a.alt_titles || [])].some((t) => t && normalizeTitle(t) === wanted);
@@ -171,7 +292,7 @@ export default function App() {
     const searchRes = await fetch(`/api/search?q=${encodeURIComponent(title)}`);
     if (!searchRes.ok) return null;
     const searchData = await searchRes.json();
-    const match = (searchData.results || []).find(sameTitle) || (strict ? null : searchData.results?.[0]);
+    const match = (searchData.results || []).find(sameTitle);
     return match && match.url && match.source ? match : null;
   };
 
@@ -180,12 +301,13 @@ export default function App() {
 
   const handleSelectAnime = async (anime) => {
     const request = ++selectRequestRef.current;
+    resumeTokenRef.current += 1; // a pending shelf resume must not open over this page
     if (anime?.url && anime?.source) {
       setSelectedAnime(anime);
       return;
     }
     try {
-      const match = await findAnimeByTitle(anime?.title, { strict: true });
+      const match = await findAnimeByTitle(anime?.title);
       if (request !== selectRequestRef.current) return;
       if (match) {
         setSelectedAnime({ ...match, cover: match.cover || anime.cover });
@@ -212,57 +334,104 @@ export default function App() {
     loadUserShelves();
   };
 
-  const handleResumeFromShelf = async (item) => {
-    const initialEp = {
+  // The season list of a continue item, resolved by the server from the stored link (strict, no recents)
+  const fetchResume = async (item, timeoutMs) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const params = new URLSearchParams({ anime_title: item.anime_title, season: item.season });
+      const res = await fetch(`/api/history/resume?${params}`, { headers: { 'X-User-ID': userId }, signal: controller.signal });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.exact ? data : null; // never attach a list from another source or version
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const contextFromResume = (data) => ({
+    anime: data.anime,
+    seasonKey: data.season.key,
+    source: data.variant.source,
+    version: data.variant.version,
+    historyKeys: data.variant.history_keys || [],
+    via: 'resume',
+    fullSeason: true
+  });
+  const sameEpisode = (ep, num) => String(ep.num || ep.title || '1') === String(num);
+  const openAnimeOf = (item) => handleSelectAnime(
+    item.anime ? { ...item.anime, cover: item.cover } : { title: item.display_title || item.anime_title, cover: item.cover }
+  );
+
+  // Continue cards, watchlist and history rows: play at once and seek, like YouTube
+  const handleResumeEpisode = async (item) => {
+    const epNum = String(item.episode_num ?? '');
+    // A non-numeric id is a raw source title (episode 0, specials): same rule as the backend's episode titles
+    const rawNum = epNum.match(/-\s*(\d+)\s*(?:vostfr|vf)\b/i);
+    const playing = {
       num: item.episode_num,
-      title: `Épisode ${item.episode_num}`,
+      title: item.episode_title
+        || (/^\d+$/.test(epNum) ? `Épisode ${epNum}` : rawNum ? `Épisode ${parseInt(rawNum[1], 10)}` : 'Épisode spécial'),
+      synthetic_title: !item.episode_title, // display only: never saved as the episode's own title
       embed_url: item.embed_url,
       file_path: item.file_path
     };
-
-    setActivePlayer({
-      animeTitle: item.anime_title,
-      cover: item.cover,
-      season: item.season,
-      episode: initialEp,
-      episodes: [initialEp],
-      initialTime: item.position_sec,
-      initialFilePath: item.file_path
-    });
-
-    // Background hydrate the season's episodes so auto-advance and the episode drawer work.
-    // The playing episode is never replaced: that would restart its playback.
-    try {
-      const match = await findAnimeByTitle(item.anime_title);
-      if (!match?.id) return;
-      const res = await fetch(`/api/anime/${encodeURIComponent(match.id)}`, { headers: { 'X-User-ID': userId } });
-      if (!res.ok) return;
-      const details = await res.json();
-
-      // The season variant this record was saved under (its history keys), from the record's source
-      const wanted = titleKey(item.anime_title);
-      const fromVoirAnime = (item.embed_url || '').includes('voir-anime');
-      let found = null;
-      (details.seasons || []).forEach((season) => {
-        (season.variants || []).forEach((variant) => {
-          if (variant.version === 'scans') return;
-          const savedHere = (variant.history_keys || []).some((k) => titleKey(k.title) === wanted && k.season === item.season);
-          if (savedHere && (!found || (variant.source === 'voiranime') === fromVoirAnime)) found = { season, variant };
-        });
+    if (!item.is_next && (item.embed_url || item.file_path)) {
+      resumeTokenRef.current += 1; // this player supersedes a pending resume
+      const linked = Boolean(item.anime?.id);
+      // Opens at once and seeks to the stored position; the season list and host fallbacks arrive later
+      setActivePlayer({
+        animeTitle: item.anime_title,
+        cover: item.cover,
+        season: item.season,
+        episode: playing,
+        episodes: [playing],
+        initialTime: item.position_sec || 0,
+        initialFilePath: item.file_path || null,
+        autoResume: true,
+        context: null,
+        fallbackPlayers: linked ? null : [] // []: no other host will come, the player need not wait for them
       });
-      if (!found) return;
-
-      const params = new URLSearchParams({ season: found.season.key, source: found.variant.source, version: found.variant.version });
-      const epsRes = await fetch(`/api/anime/${encodeURIComponent(details.id)}/episodes?${params}`);
-      if (!epsRes.ok) return;
-      const fullEps = (await epsRes.json()).episodes || [];
-      if (fullEps.length > 0) {
-        setActivePlayer((prev) => (
-          prev && prev.animeTitle === item.anime_title && prev.season === item.season ? { ...prev, episodes: fullEps } : prev
-        ));
+      if (!linked) return; // unlinked record: the stored episode only, never a guess
+      const data = await fetchResume(item, 15000);
+      const full = data?.episodes.find((ep) => sameEpisode(ep, item.episode_num));
+      // The playing episode is never replaced: that would restart its playback
+      setActivePlayer((prev) => (
+        prev && prev.animeTitle === item.anime_title && prev.season === item.season && sameEpisode(prev.episode, item.episode_num)
+          ? data
+            ? { ...prev, episodes: data.episodes, context: contextFromResume(data), fallbackPlayers: full?.players || [] }
+            : { ...prev, fallbackPlayers: [] }
+          : prev
+      ));
+      return;
+    }
+    if (resumingKey) return; // taps during a pending resume are ignored
+    const token = ++resumeTokenRef.current;
+    setResumingKey(item.key);
+    try {
+      const data = item.anime?.id ? await fetchResume(item, 8000) : null;
+      if (token !== resumeTokenRef.current) return; // the user played, opened or closed something meanwhile
+      const ep = data?.episodes.find((e) => sameEpisode(e, item.episode_num));
+      if (ep) {
+        setActivePlayer({
+          animeTitle: item.anime_title,
+          cover: item.cover,
+          season: item.season,
+          episode: ep,
+          episodes: data.episodes,
+          initialTime: item.is_next ? 0 : (item.position_sec || 0),
+          initialFilePath: null,
+          autoResume: !item.is_next,
+          context: contextFromResume(data),
+          fallbackPlayers: null
+        });
+      } else {
+        openAnimeOf(item); // timeout, 404 or variant no longer served
       }
-    } catch (e) {
-      console.warn("Could not background hydrate episodes for resume:", e);
+    } finally {
+      setResumingKey((key) => (key === item.key ? null : key));
     }
   };
 
@@ -328,6 +497,7 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         activeDownloadsCount={activeDownloadsCount}
+        watchlistCount={watchlist.length}
         onOpenDownloads={() => setIsDownloadsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenStats={() => setIsStatsOpen(true)}
@@ -346,22 +516,40 @@ export default function App() {
             continueWatching={continueWatching}
             recentAnimes={recentAnimes}
             randomSuggestions={randomSuggestions}
+            watchlist={watchlist}
+            isInWatchlist={isInWatchlist}
+            onToggleWatchlist={handleToggleWatchlist}
+            onOpenWatchlist={() => setActiveTab('watchlist')}
+            resumingKey={resumingKey}
             onRollRandom={loadRandomSuggestions}
             onSelectAnime={handleSelectAnime}
-            onResumeEpisode={handleResumeFromShelf}
+            onResumeEpisode={handleResumeEpisode}
           />
         ) : activeTab === 'history' ? (
           <HistoryView
             currentUser={currentUser}
+            resumingKey={resumingKey}
             onSelectAnime={handleSelectAnime}
-            onPlayEpisode={(title, season, ep, eps, cover, time, filePath) =>
-              handlePlayEpisode(title, season, ep, eps, cover, time, filePath)
-            }
+            onResumeEpisode={handleResumeEpisode}
+          />
+        ) : activeTab === 'watchlist' ? (
+          // Remounted per profile: the ghosts of one profile must never be re-added to another
+          <WatchlistView
+            key={userId}
+            currentUser={currentUser}
+            watchlist={watchlist}
+            continueWatching={continueWatching}
+            isInWatchlist={isInWatchlist}
+            resumingKey={resumingKey}
+            onReload={loadWatchlist}
+            onSelectAnime={handleSelectAnime}
+            onToggleWatchlist={handleToggleWatchlist}
+            onResumeEpisode={handleResumeEpisode}
           />
         ) : (
           <OfflineLibraryView
-            onPlayEpisode={(title, season, ep, eps, cover, time, filePath) =>
-              handlePlayEpisode(title, season, ep, eps, cover, time, filePath)
+            onPlayEpisode={(title, season, ep, eps, cover, time, filePath, context) =>
+              handlePlayEpisode(title, season, ep, eps, cover, time, filePath, context)
             }
           />
         )}
@@ -372,12 +560,14 @@ export default function App() {
           currentUser={currentUser}
           anime={selectedAnime}
           onClose={handleCloseAnime}
-          onPlayEpisode={(animeTitle, season, ep, eps, cover, time, filePath) => {
-            handlePlayEpisode(animeTitle, season, ep, eps, cover, time, filePath);
+          onPlayEpisode={(animeTitle, season, ep, eps, cover, time, filePath, context) => {
+            handlePlayEpisode(animeTitle, season, ep, eps, cover, time, filePath, context);
             loadUserShelves();
           }}
           onDownloadEpisode={handleDownloadEpisode}
           onDownloadBulk={handleDownloadBulk}
+          isInWatchlist={isInWatchlist}
+          onToggleWatchlist={handleToggleWatchlist}
         />
       )}
 
@@ -391,13 +581,26 @@ export default function App() {
           episodes={activePlayer.episodes}
           initialTime={activePlayer.initialTime}
           initialFilePath={activePlayer.initialFilePath}
-          onClose={() => {
+          context={activePlayer.context}
+          autoResume={activePlayer.autoResume}
+          fallbackPlayers={activePlayer.fallbackPlayers}
+          onClose={(lastSave) => {
+            resumeTokenRef.current += 1;
             setActivePlayer(null);
-            loadUserShelves();
+            // Once the player's last save is stored: the shelf then shows the final position
+            Promise.resolve(lastSave).catch(() => {}).finally(loadUserShelves);
           }}
           onDownloadEpisode={handleDownloadEpisode}
           onSelectNextEpisode={(nextEp) => {
-            setActivePlayer((prev) => ({ ...prev, episode: nextEp, initialTime: 0, initialFilePath: nextEp.file_path || null }));
+            // The context is kept: same anime, same season variant
+            setActivePlayer((prev) => ({
+              ...prev,
+              episode: nextEp,
+              initialTime: 0,
+              initialFilePath: nextEp.file_path || null,
+              autoResume: false,
+              fallbackPlayers: null
+            }));
           }}
         />
       )}
@@ -427,6 +630,30 @@ export default function App() {
         currentUser={currentUser}
         onSelectUser={handleSelectUser}
       />
+
+      {/* Above the detail modal (50), below the player (9999) */}
+      {notice && (
+        <div
+          role="status"
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: 'calc(20px + env(safe-area-inset-bottom))',
+            transform: 'translateX(-50%)',
+            zIndex: 60,
+            background: '#21262D',
+            border: '1px solid var(--border-active)',
+            borderRadius: 'var(--radius-full)',
+            padding: '8px 16px',
+            fontSize: '0.85rem',
+            color: '#fff',
+            maxWidth: 'calc(100vw - 32px)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
+          }}
+        >
+          {notice}
+        </div>
+      )}
     </div>
   );
 }

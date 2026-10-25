@@ -280,3 +280,161 @@ def test_lookup_only_accepts_source_urls(gw):
     assert asyncio.run(gw.lookup("voiranime", "https://evil.test/anime/x/", "X")) is None
     assert asyncio.run(gw.lookup("anime_sama", VA_S1, "Sousou no Frieren")) is None
     assert asyncio.run(gw.lookup("voiranime", VA_S1, "Sousou no Frieren"))["id"] == "a-frieren"
+
+
+def test_infer_links_maps_legacy_titles_deterministically(tmp_path, monkeypatch):
+    gw = _make_gateway(tmp_path, monkeypatch, AS_ROWS, VA_ROWS, FRIEREN_ENTRIES, catalog=FRIEREN_ENTRIES)
+    items = [("Sousou No Frieren", "", []), ("Sousou No Frieren Vf", "", []), ("Sousou No Frieren 2", "", []),
+             ("Frieren", "", []), ("Zzz Unknown Show", "", [])]
+    links = gw.infer_links(items)
+
+    assert set(links) == {"Sousou No Frieren", "Sousou No Frieren Vf", "Sousou No Frieren 2", "Frieren"}
+    assert all(link["id"] == "a-frieren" and link["title"] == "Frieren" for link in links.values())
+    # The evidence entry is the lookup fallback
+    assert (links["Sousou No Frieren 2"]["source"], links["Sousou No Frieren 2"]["url"],
+            links["Sousou No Frieren 2"]["entry_title"]) == ("voiranime", VA_S2, "Sousou no Frieren 2")
+    assert links["Sousou No Frieren Vf"]["url"] == VA_S1_VF
+    assert (links["Frieren"]["source"], links["Frieren"]["url"]) == ("anime_sama", AS_URL)
+    assert gw.infer_links(items) == links
+
+
+def test_infer_links_prefers_voiranime_episode_urls_and_refuses_homonyms(tmp_path, monkeypatch):
+    hxh, hxh_2011 = "https://anime-sama.to/catalogue/hunter-x-hunter", "https://anime-sama.to/catalogue/hunter-x-hunter-2011"
+    va_hxh = "https://voir-anime.to/anime/hunter-x-hunter/"
+    entries = [Entry("anime_sama", hxh, "Hunter x Hunter"), Entry("anime_sama", hxh_2011, "Hunter x Hunter"),
+               Entry("voiranime", va_hxh, "Hunter x Hunter"), Entry("anime_sama", AS_URL, "Frieren")]
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], entries, catalog=entries)
+    img = "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/{}.jpg"
+
+    # Two Anime-Sama pages with one title: refused on the name alone
+    assert gw.infer_links([("Hunter x Hunter", "", [])]) == {}
+    # An Anime-Sama cover slug only breaks the tie when it names one of the candidates
+    [link] = gw.infer_links([("Hunter x Hunter", img.format("hunter-x-hunter-2011"), [])]).values()
+    assert link["url"] == hxh_2011 and link["id"] != "a-hunter-x-hunter"
+    assert gw.infer_links([("Hunter x Hunter", img.format("frieren"), [])]) == {}
+    # A played VoirAnime episode names its post
+    episode = f"{va_hxh}hunter-x-hunter-12-vostfr/"
+    [link] = gw.infer_links([("Hunter x Hunter", "", [episode])]).values()
+    assert (link["id"], link["source"], link["url"]) == ("a-hunter-x-hunter", "voiranime", va_hxh)
+
+
+def test_infer_links_never_links_a_voiranime_record_by_its_cover_alone(tmp_path, monkeypatch):
+    naruto = "https://anime-sama.to/catalogue/naruto"
+    entries = [Entry("anime_sama", naruto, "Naruto"), Entry("anime_sama", AS_URL, "Frieren")]
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], [], catalog=entries)
+    naruto_art = "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/naruto.jpg"
+    boruto_ep = "https://voir-anime.to/anime/boruto-naruto-next-generations/boruto-naruto-next-generations-12-vostfr/"
+
+    # VoirAnime episode urls of a post the index does not know: the old fuzzy Anime-Sama cover proves nothing
+    assert gw.infer_links([("Boruto Naruto Next Generations", naruto_art, [boruto_ep])]) == {}
+    # Without VoirAnime playback the cover slug may still stand alone
+    [link] = gw.infer_links([("Naruto Shippuden", naruto_art, [])]).values()
+    assert (link["id"], link["url"]) == ("a-naruto", naruto)
+
+
+def test_infer_links_reads_keys_under_the_index_lock(tmp_path, monkeypatch):
+    gw = _make_gateway(tmp_path, monkeypatch, AS_ROWS, VA_ROWS, FRIEREN_ENTRIES, catalog=FRIEREN_ENTRIES)
+    real = gw.index.canonical_key
+
+    def locked_only(entry, siblings=None):
+        # canonical_key iterates live sets that set_catalog (another thread) can grow
+        assert gw.index._lock._is_owned()
+        return real(entry, siblings)
+
+    monkeypatch.setattr(gw.index, "canonical_key", locked_only)
+    gw.index._canon_cache.clear()
+    episode = f"{VA_S2}sousou-no-frieren-2-03-vostfr/"
+    links = gw.infer_links([("Sousou No Frieren", "", []), ("Zzz", "", [episode]),
+                            ("Frieren", "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/frieren.jpg", [])])
+    assert {link["id"] for link in links.values()} == {"a-frieren"} and len(links) == 3
+
+
+def test_valid_entry_is_total():
+    assert YoitsuGateway.valid_entry("anime_sama", AS_URL)
+    for source, url in (("anime_sama", "https://[bad"), ("voiranime", "https://voir-anime.to]/anime/x/"),
+                        ("anime_sama", 7), (7, AS_URL), (None, None), ("other", AS_URL)):
+        assert YoitsuGateway.valid_entry(source, url) is False
+
+
+def test_infer_links_needs_the_catalogue(gw):
+    assert not gw.index.catalog_loaded
+    assert gw.infer_links([("Sousou No Frieren", "", [])]) == {}
+
+
+def test_canonical_id_follows_learned_aliases(gw):
+    gw.aliases.union({"kimetsu no yaiba", "demon slayer"})
+    assert gw.canonical_id("a-kimetsu-no-yaiba") == "a-demon-slayer"
+    assert gw.canonical_id("a-demon-slayer") == "a-demon-slayer"
+    assert gw.canonical_id("a-sousou-no-frieren") == "a-frieren"
+    assert gw.canonical_id("") == "" and gw.canonical_id("title:x") == "title:x"
+
+
+def test_anime_ref_and_history_claims_from_details(gw):
+    details = asyncio.run(gw.details("a-frieren"))
+    ref = gw.anime_ref({**details, "banner": "/api/img?url=https%3A%2F%2Fs4.anilist.co%2Fb.jpg"})
+    assert (ref["id"], ref["source"], ref["url"], ref["entry_title"]) == ("a-frieren", "anime_sama", AS_URL, "Frieren")
+    assert ref["banner"] == "https://s4.anilist.co/b.jpg"
+    assert gw.anime_ref(details)["banner"] is None
+
+    claims = gw.history_claims(details)
+    assert claims[("sousou no frieren vf", "Saison 1")] == [{"key": "saison-1", "source": "voiranime", "version": "vf"}]
+    assert claims[("frieren", "Saison 1")] == [{"key": "saison-1", "source": "anime_sama", "version": "vostfr"}]
+    assert claims[("frieren", "Saison 1 VF")] == [{"key": "saison-1", "source": "anime_sama", "version": "vf"}]
+    assert claims[("sousou no frieren 2", "Saison 1")] == [{"key": "saison-2", "source": "voiranime", "version": "vostfr"}]
+    assert all(c["key"] != "scans" for cands in claims.values() for c in cands)
+
+
+def test_live_id_relooks_up_a_dead_id(gw):
+    assert asyncio.run(gw.live_id({"id": "a-frieren"})) == "a-frieren"
+    dead = {"id": "a-sousou-no-frieren-old-page", "source": "voiranime", "url": VA_S1, "entry_title": "Sousou no Frieren"}
+    assert asyncio.run(gw.live_id(dead)) == "a-frieren"
+    assert asyncio.run(gw.live_id({"id": "a-gone", "source": "", "url": ""})) is None
+
+
+def test_live_id_follows_the_stored_entry_when_a_homonymous_page_takes_the_id(tmp_path, monkeypatch):
+    sk21, sk = "https://anime-sama.to/catalogue/shaman-king-2021", "https://anime-sama.to/catalogue/shaman-king"
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], [Entry("anime_sama", sk21, "Shaman King")])
+    assert asyncio.run(gw.lookup("anime_sama", sk21, "Shaman King"))["id"] == "a-shaman-king"
+    ref = {"id": "a-shaman-king", "title": "Shaman King", "source": "anime_sama", "url": sk21, "entry_title": "Shaman King"}
+    assert asyncio.run(gw.live_id(ref)) == "a-shaman-king"
+
+    # The 2001 page (shorter slug) takes the plain key; the stored page is re-keyed on its slug
+    gw.index.remember([Entry("anime_sama", sk, "Shaman King")])
+    assert asyncio.run(gw.live_id(ref)) == "a-shaman-king-shaman-king-2021"
+    assert asyncio.run(gw.live_id({**ref, "url": sk})) == "a-shaman-king"
+    # An entry the index does not know never overrides a live id (nothing is remembered)
+    unknown = {**ref, "url": "https://anime-sama.to/catalogue/shaman-king-flowers"}
+    assert asyncio.run(gw.live_id(unknown)) == "a-shaman-king"
+    assert not gw.index.knows(("anime_sama", "shaman-king-flowers"))
+
+
+def test_live_id_ignores_voiranime_entry_keys_before_the_catalogue(tmp_path, monkeypatch):
+    root, sequel = "https://voir-anime.to/anime/mob-psycho-100/", "https://voir-anime.to/anime/mob-psycho-100-ii/"
+    entries = [Entry("voiranime", root, "Mob Psycho 100"), Entry("voiranime", sequel, "Mob Psycho 100 II")]
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], entries)
+    ref = {"id": "a-mob-psycho-100", "title": "Mob Psycho 100", "source": "voiranime", "url": sequel,
+           "entry_title": "Mob Psycho 100 II"}
+    # Without sibling evidence the sequel post looks like its own anime: the stored link must not be split off
+    assert asyncio.run(gw.live_id(ref)) == "a-mob-psycho-100"
+    gw.index.set_catalog(entries)
+    assert asyncio.run(gw.live_id(ref)) == "a-mob-psycho-100"
+
+
+def test_entry_idents_cover_every_member_of_the_entity(gw):
+    details = asyncio.run(gw.details("a-frieren"))
+    idents = asyncio.run(gw.entry_idents(details))
+    # Listed sources are the root entries only; the sequel and VF posts are members too
+    assert idents == {"anime_sama:frieren", "voiranime:sousou-no-frieren", "voiranime:sousou-no-frieren-2",
+                      "voiranime:sousou-no-frieren-vf"}
+    assert asyncio.run(gw.entry_idents({"id": "a-gone", "source": "anime_sama", "url": "https://[bad", "sources": [7]})) == set()
+
+
+def test_episodes_report_anime_id(gw, monkeypatch):
+    async def as_players(url, version, refresh=False):
+        return [{"num": 1, "title": "Épisode 1", "embed_url": "https://vidmoly.net/e1", "players": []}]
+
+    monkeypatch.setattr(gateway_module.catalog_service, "fetch_anime_sama_players", as_players)
+    # Requested under an id that an alias renamed: the result names the current one
+    result = asyncio.run(gw.episodes("a-sousou-no-frieren", "saison-1", "anime_sama", "vostfr"))
+    assert result["anime_id"] == "a-frieren" and result["episodes"]
+    assert asyncio.run(gw.episodes("a-frieren", "scans", "anime_sama", "vostfr"))["anime_id"] == "a-frieren"

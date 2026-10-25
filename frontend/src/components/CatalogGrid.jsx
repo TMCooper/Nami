@@ -1,6 +1,8 @@
 import React from 'react';
-import { Play, RotateCcw, Shuffle, Sparkles, Clock, History, Film } from 'lucide-react';
+import { Play, RotateCcw, Shuffle, Sparkles, History, Film, Bookmark } from 'lucide-react';
 
+import ContinueCard from './ContinueCard';
+import WatchlistButton from './WatchlistButton';
 import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
 
 const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
@@ -19,22 +21,22 @@ export default function CatalogGrid({
   continueWatching = [],
   recentAnimes = [],
   randomSuggestions = [],
+  watchlist = [],
+  isInWatchlist = () => false,
+  onToggleWatchlist,
+  onOpenWatchlist,
+  resumingKey,
   onRollRandom,
   onSelectAnime,
   onResumeEpisode
 }) {
-  const formatTime = (seconds) => {
-    if (!seconds) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
-
   const filteredContinueWatching = (continueWatching || []).filter((item) => {
     if (activeSource === 'all') return true;
     if (item.source) return item.source === activeSource;
     return true;
   });
+
+  const filteredWatchlist = (watchlist || []).filter((anime) => activeSource === 'all' || hasSource(anime, activeSource));
 
   const filteredRecentAnimes = (recentAnimes || []).filter((anime) => {
     if (activeSource === 'all') return true;
@@ -51,25 +53,6 @@ export default function CatalogGrid({
     return hasSource(anime, activeSource);
   });
 
-  if (isLoading) {
-    return (
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-        gap: '16px',
-        padding: '24px 0'
-      }}>
-        {[...Array(12)].map((_, i) => (
-          <div key={i} className="surface-card" style={{
-            borderRadius: 'var(--radius-sm)',
-            height: '280px',
-            opacity: 0.3
-          }}></div>
-        ))}
-      </div>
-    );
-  }
-
   const isBrowsingHome = !searchQuery.trim();
 
   return (
@@ -82,56 +65,78 @@ export default function CatalogGrid({
             <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>Continuer la lecture</h2>
           </div>
 
+          {/* 2 columns on phones, 5 at 1440 px, without a media query */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-            gap: '14px'
+            gridTemplateColumns: 'repeat(auto-fill, minmax(clamp(140px, 40vw, 250px), 1fr))',
+            gap: '16px 12px'
           }}>
-            {filteredContinueWatching.slice(0, 6).map((item, idx) => (
+            {filteredContinueWatching.slice(0, 8).map((item) => (
+              <ContinueCard
+                key={item.key}
+                item={item}
+                isResuming={resumingKey === item.key}
+                onResume={onResumeEpisode}
+                onOpenAnime={(i) => onSelectAnime({ ...i.anime, cover: i.cover })}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* À regarder plus tard (Watchlist Shelf) */}
+      {isBrowsingHome && filteredWatchlist.length > 0 && (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Bookmark size={18} color="var(--accent-yellow)" />
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#fff' }}>À regarder plus tard</h2>
+            </div>
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '0.78rem', padding: '4px 10px', minHeight: '32px' }}
+              onClick={onOpenWatchlist}
+            >
+              Tout voir ({filteredWatchlist.length})
+            </button>
+          </div>
+
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(clamp(96px, 26vw, 160px), 1fr))',
+            gap: '10px'
+          }}>
+            {filteredWatchlist.slice(0, 6).map((anime) => (
               <div
-                key={idx}
+                key={anime.id || anime.url}
                 className="surface-card animate-fade-in"
+                onClick={() => onSelectAnime(anime)}
                 style={{
-                  padding: '14px',
-                  borderRadius: 'var(--radius-md)',
+                  borderRadius: 'var(--radius-sm)',
+                  overflow: 'hidden',
+                  cursor: 'pointer',
                   border: '1px solid var(--border-color)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'space-between',
-                  gap: '10px',
-                  background: 'linear-gradient(145deg, rgba(22, 27, 34, 0.9), rgba(13, 17, 23, 0.9))'
+                  transition: 'var(--transition)'
                 }}
+                onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-3px)'}
+                onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
               >
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff', lineHeight: 1.3 }}>
-                      {item.anime_title}
-                    </h3>
-                  </div>
-                  <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
-                    {item.season} — Épisode {item.episode_num}
-                  </p>
+                <div style={{ position: 'relative', width: '100%', aspectRatio: '2 / 3', overflow: 'hidden', background: '#0D1117' }}>
+                  <img
+                    src={anime.cover || DEFAULT_ANIME_COVER}
+                    loading="lazy"
+                    decoding="async"
+                    alt={anime.title}
+                    onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  <WatchlistButton active onToggle={() => onToggleWatchlist(anime)} />
                 </div>
-
-                {/* Progress bar */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-dim)', marginBottom: '4px' }}>
-                    <span>Progression</span>
-                    <span>{formatTime(item.position_sec)} / {formatTime(item.duration_sec)}</span>
-                  </div>
-                  <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.08)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-                    <div style={{ width: `${Math.min(100, Math.max(5, item.progress_percent))}%`, height: '100%', background: 'linear-gradient(90deg, var(--primary), var(--accent-cyan))' }}></div>
-                  </div>
+                <div style={{ padding: '8px 10px' }}>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#fff', lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                    {anime.title}
+                  </span>
                 </div>
-
-                {/* Resume button */}
-                <button
-                  className="btn btn-primary"
-                  style={{ width: '100%', padding: '7px 12px', fontSize: '0.8rem' }}
-                  onClick={() => onResumeEpisode(item)}
-                >
-                  <Play size={13} fill="#fff" /> Reprendre l'Épisode {item.episode_num}
-                </button>
               </div>
             ))}
           </div>
@@ -166,7 +171,7 @@ export default function CatalogGrid({
                 onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-3px)'}
                 onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
               >
-                <div style={{ width: '100%', height: '180px', overflow: 'hidden', background: '#0D1117' }}>
+                <div style={{ position: 'relative', width: '100%', height: '180px', overflow: 'hidden', background: '#0D1117' }}>
                   <img
                     src={anime.cover || DEFAULT_ANIME_COVER}
                     loading="lazy"
@@ -175,6 +180,7 @@ export default function CatalogGrid({
                     onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
+                  <WatchlistButton active={isInWatchlist(anime)} onToggle={() => onToggleWatchlist(anime)} />
                 </div>
                 <div style={{ padding: '8px 10px' }}>
                   <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#fff', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
@@ -226,7 +232,7 @@ export default function CatalogGrid({
                 onMouseEnter={(e) => e.currentTarget.style.transform = 'translateY(-3px)'}
                 onMouseLeave={(e) => e.currentTarget.style.transform = 'translateY(0)'}
               >
-                <div style={{ width: '100%', height: '220px', overflow: 'hidden', background: '#0D1117' }}>
+                <div style={{ position: 'relative', width: '100%', height: '220px', overflow: 'hidden', background: '#0D1117' }}>
                   <img
                     src={anime.cover || DEFAULT_ANIME_COVER}
                     loading="lazy"
@@ -235,6 +241,7 @@ export default function CatalogGrid({
                     onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
+                  <WatchlistButton active={isInWatchlist(anime)} onToggle={() => onToggleWatchlist(anime)} />
                 </div>
                 <div style={{ padding: '8px 10px' }}>
                   <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
@@ -251,11 +258,27 @@ export default function CatalogGrid({
       <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>
-            {searchQuery ? `Résultats pour "${searchQuery}" (${filteredResults.length})` : 'Catalogue complet'}
+            {/* No count while loading: it would still be the previous search's */}
+            {searchQuery ? `Résultats pour "${searchQuery}"${isLoading ? '' : ` (${filteredResults.length})`}` : 'Catalogue complet'}
           </h2>
         </div>
 
-        {filteredResults.length === 0 ? (
+        {/* Skeleton here only: the shelves above stay visible while the catalogue reloads */}
+        {isLoading ? (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+            gap: '16px'
+          }}>
+            {[...Array(12)].map((_, i) => (
+              <div key={i} className="surface-card" style={{
+                borderRadius: 'var(--radius-sm)',
+                height: '280px',
+                opacity: 0.3
+              }}></div>
+            ))}
+          </div>
+        ) : filteredResults.length === 0 ? (
           <div style={{
             display: 'flex',
             flexDirection: 'column',
@@ -355,6 +378,8 @@ export default function CatalogGrid({
                         <Play size={20} fill="#fff" style={{ marginLeft: '2px' }} />
                       </div>
                     </div>
+
+                    <WatchlistButton active={isInWatchlist(anime)} onToggle={() => onToggleWatchlist(anime)} />
                   </div>
 
                   <div style={{ padding: '10px 12px' }}>

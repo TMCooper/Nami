@@ -124,17 +124,23 @@ class UserService:
             # Clean user history
             try:
                 from backend.services.history_service import history_service
-                if user_id in history_service.history:
-                    del history_service.history[user_id]
-                    history_service._save()
+                history_service.delete_user_data(user_id)
             except Exception as e:
                 print(f"[UserService] Error deleting user history: {e}")
+
+            # Clean user watchlist
+            try:
+                from backend.services.watchlist_service import watchlist_service
+                watchlist_service.delete_user_data(user_id)
+            except Exception as e:
+                print(f"[UserService] Error deleting user watchlist: {e}")
 
             # Clean user recent items
             try:
                 from backend.services.cache_service import cache_service
-                if user_id in cache_service.recent_data:
-                    del cache_service.recent_data[user_id]
+                with cache_service._recent_lock:
+                    removed = cache_service.recent_data.pop(user_id, None)
+                if removed is not None:
                     cache_service._save_recent()
             except Exception as e:
                 print(f"[UserService] Error deleting user recents: {e}")

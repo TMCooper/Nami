@@ -45,7 +45,12 @@ def split_version(title: str) -> Tuple[str, Optional[str]]:
 
 
 def slug_of(url: str) -> str:
-    path = urlparse(url or "").path.rstrip("/")
+    if not isinstance(url, str):
+        return ""
+    try:
+        path = urlparse(url).path.rstrip("/")
+    except ValueError:
+        return ""  # unbalanced IPv6 brackets ('https://[bad'): names no page
     return path.split("/")[-1].lower() if path else ""
 
 

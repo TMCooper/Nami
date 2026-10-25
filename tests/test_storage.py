@@ -2,7 +2,7 @@ import os
 import json
 import glob
 
-from backend.services.storage import load_json, save_json
+from backend.services.storage import load_json, save_json, save_json_text
 
 
 def test_save_then_load_roundtrip(tmp_path):
@@ -37,3 +37,13 @@ def test_corrupt_file_falls_back_to_backup_and_is_kept_aside(tmp_path):
 def test_missing_file_returns_default(tmp_path):
     assert load_json(str(tmp_path / "nope.json"), list) == []
     assert not os.listdir(tmp_path)
+
+
+def test_save_json_text_is_atomic_and_keeps_backup(tmp_path):
+    path = str(tmp_path / "nested" / "store.json")
+    save_json_text(path, '{"v": 1}')
+    save_json_text(path, '{"v":2,"é":"ü"}')
+    assert load_json(path, dict) == {"v": 2, "é": "ü"}
+    with open(path + ".bak", encoding="utf-8") as f:
+        assert json.load(f) == {"v": 1}
+    assert not glob.glob(path + ".tmp-*")

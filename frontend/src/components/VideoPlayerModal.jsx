@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
   X,
@@ -18,7 +18,30 @@ import {
   VolumeX,
   Volume1
 } from 'lucide-react';
-import { findStoredRecord } from '../utils/titles';
+import { findHistoryEntries } from '../utils/titles';
+
+const FINISHED_RATIO = 0.85;
+const HOST_WAIT_MS = 6000; // shelf resume: how long a stream-less stored host waits for the other hosts
+
+// "Finished" as the server sees it (_finished): an explicit mark after the last play wins,
+// and a rewatch in progress (watched stays true) is resumable again
+const isFinished = (e) => {
+  const ratio = e.duration_sec > 0 ? e.position_sec / e.duration_sec : 0;
+  if (e.watched_at != null && e.watched_at >= (e.played_at || 0)) return Boolean(e.watched);
+  if (e.played_at != null) return ratio >= FINISHED_RATIO;
+  return Boolean(e.watched) || ratio >= FINISHED_RATIO;
+};
+
+// Entity context of a history write (the server links the record and remembers the next episode with it)
+const historyContext = (s) => ({
+  anime: s.context?.anime || null,
+  season_key: s.context?.seasonKey || null,
+  source: s.context?.source || null,
+  version: s.context?.version || null,
+  ep_title: s.epTitle || null,
+  next_ep: s.nextEp ? { ep_id: String(s.nextEp.num || s.nextEp.title || ''), title: s.nextEp.title || '' } : null,
+  link_via: s.context?.via === 'resume' ? 'resume' : null
+});
 
 export default function VideoPlayerModal({
   currentUser,
@@ -29,6 +52,9 @@ export default function VideoPlayerModal({
   episodes,
   initialTime = 0,
   initialFilePath = null,
+  context = null,
+  autoResume = false,
+  fallbackPlayers = null,
   onClose,
   onDownloadEpisode,
   onSelectNextEpisode
@@ -37,6 +63,18 @@ export default function VideoPlayerModal({
   const containerRef = useRef(null);
   const progressBarRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
+  const contextRef = useRef(context);
+  contextRef.current = context;
+  const fallbackPlayersRef = useRef(fallbackPlayers);
+  fallbackPlayersRef.current = fallbackPlayers;
+  const identityRef = useRef(null); // the episode on screen, see the identity layout effect
+  const sampleRef = useRef(null); // last position sample, with the identity it was taken for
+  const samplingRef = useRef(false); // false until the current source reports its own metadata
+  const pendingSeekRef = useRef(0); // shelf resume position not reached yet
+  const hlsRef = useRef(null); // attached hls.js instance, destroyed on an episode switch
+  const localSrcRef = useRef(null); // local stream URL last assigned to the video (video.src is normalized)
+  const playingEmbedRef = useRef(null); // { key, embed }: host whose stream actually played the episode
+  const hostWaitRef = useRef(null); // { timer, shown } while a stream-less stored host waits for the host list
 
   const [streamInfo, setStreamInfo] = useState(null);
   // Every player (host) of the episode; selectedEmbed is the player being resolved (picked by the
@@ -72,6 +110,7 @@ export default function VideoPlayerModal({
 
   const epId = String(episode?.num || episode?.title || '1');
   const userId = currentUser?.id || 'default';
+  const episodeKey = `${animeTitle}\u0000${season}\u0000${epId}`;
 
   // Format time (mm:ss or hh:mm:ss)
   const formatTime = (seconds) => {
@@ -140,7 +179,58 @@ export default function VideoPlayerModal({
     return () => { cancelled = true; };
   }, [episode]);
 
-  // Fetch watch history to know if we should offer resume, and resolve online stream
+  // Offer to resume a stored position. Its own effect: host and source switches must not prompt again.
+  // A shelf resume (autoResume) seeks by itself and never prompts.
+  useEffect(() => {
+    setShowResumePrompt(false);
+    if (!animeTitle || !episode || autoResume) return;
+    if (initialTime > 10) {
+      setResumeTime(initialTime);
+      setShowResumePrompt(true);
+      return;
+    }
+    let cancelled = false;
+    fetch('/api/history', { headers: { 'X-User-ID': userId } })
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        // Every key the variant may be stored under (legacy keys included), else the player's own;
+        // among them, the resumable entry played last
+        const keys = contextRef.current?.historyKeys?.length ? contextRef.current.historyKeys : [{ title: animeTitle, season }];
+        const ep = findHistoryEntries(data, keys)
+          .map(({ season: s, record }) => record.episodes?.[`${s}:${epId}`])
+          .filter((e) => e && e.position_sec > 10 && !isFinished(e))
+          .sort((a, b) => (b.played_at || b.last_watched_at || 0) - (a.played_at || a.last_watched_at || 0))[0];
+        if (ep) {
+          setResumeTime(ep.position_sec);
+          setShowResumePrompt(true);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [episode, animeTitle, season, epId, userId, initialTime, autoResume]);
+
+  // Shows a resolution result: { data, embed }
+  const showResolved = (shown) => {
+    setStreamInfo(shown.data);
+    setShownEmbed(shown.embed);
+    setIsLoading(false);
+  };
+
+  const cancelHostWait = () => {
+    if (hostWaitRef.current) clearTimeout(hostWaitRef.current.timer);
+    hostWaitRef.current = null;
+  };
+
+  // Shelf resume whose season list (and with it the other hosts) has not arrived yet.
+  // VoirAnime episodes get their hosts from their own page (players effect), never from that list.
+  const awaitsHostList = () => {
+    const pageUrl = episode?.embed_url || episode?.url || '';
+    return autoResume && !contextRef.current && fallbackPlayersRef.current == null
+      && !episode?.players?.length && !playersRef.current.length && !pageUrl.includes('voir-anime');
+  };
+
+  // Resolve the online stream
   useEffect(() => {
     if (!animeTitle || !episode) return;
     setStreamInfo(null); // Clear previous stream
@@ -149,24 +239,6 @@ export default function VideoPlayerModal({
       setIsLoading(false);
     } else {
       setIsLoading(true);
-    }
-
-    if (initialTime && initialTime > 10) {
-      setResumeTime(initialTime);
-      setShowResumePrompt(true);
-    } else {
-      fetch('/api/history', {
-        headers: { 'X-User-ID': userId }
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          const epRecord = findStoredRecord(data, animeTitle)?.episodes?.[`${season}:${epId}`];
-          if (epRecord && epRecord.position_sec > 10 && !epRecord.watched) {
-            setResumeTime(epRecord.position_sec);
-            setShowResumePrompt(true);
-          }
-        })
-        .catch(() => {});
     }
 
     let cancelled = false; // a newer episode / player choice supersedes this resolution
@@ -178,6 +250,8 @@ export default function VideoPlayerModal({
         .then((data) => {
           if (cancelled) return;
           if (data.iframe_url) triedEmbedsRef.current.add(data.iframe_url);
+          // Saved with the progress, so a resume opens it first (keyed: a late answer for the previous episode is ignored)
+          if (data.stream_url) playingEmbedRef.current = { key: episodeKey, embed: embedUrl };
           let shown = { data, embed: data.iframe_url || embedUrl };
           if (!data.stream_url && !userPickedRef.current) {
             // No direct stream from this host: try the next player, and if none has one,
@@ -188,11 +262,21 @@ export default function VideoPlayerModal({
               setSelectedEmbed(next.embed_url);
               return;
             }
+            if (awaitsHostList()) {
+              // The other hosts come with the season list: an iframe shown now could not seek and would be
+              // torn down when they arrive. Keep loading for a while and let the list decide (fallbackPlayers effect).
+              hostWaitRef.current = {
+                shown,
+                timer: setTimeout(() => {
+                  hostWaitRef.current = null;
+                  showResolved(firstIframeRef.current || shown);
+                }, HOST_WAIT_MS)
+              };
+              return;
+            }
             shown = firstIframeRef.current || shown;
           }
-          setStreamInfo(shown.data);
-          setShownEmbed(shown.embed);
-          setIsLoading(false);
+          showResolved(shown);
         })
         .catch((err) => {
           if (cancelled) return;
@@ -206,8 +290,33 @@ export default function VideoPlayerModal({
         .then((data) => { if (!cancelled) setStreamInfo(data); })
         .catch(() => {});
     }
-    return () => { cancelled = true; };
-  }, [episode, animeTitle, season, userId, epId, initialTime, activeSourceType, selectedEmbed]);
+    return () => {
+      cancelled = true;
+      cancelHostWait();
+    };
+  }, [episode, animeTitle, season, epId, activeSourceType, selectedEmbed]);
+
+  // Host fallbacks of a resumed Anime-Sama episode, merged in once the season list arrives (playback is not restarted).
+  // [] means no list is coming (unlinked record, failed lookup).
+  useEffect(() => {
+    if (!fallbackPlayers || episode?.players?.length) return;
+    if (fallbackPlayers.length) {
+      setPlayers(fallbackPlayers);
+      playersRef.current = fallbackPlayers;
+    }
+    const next = fallbackPlayers.find((p) => !triedEmbedsRef.current.has(p.embed_url));
+    const waiting = hostWaitRef.current;
+    if (waiting) {
+      // The stored host has no stream and was waiting for this list: try the others, else show its iframe
+      cancelHostWait();
+      if (next) setSelectedEmbed(next.embed_url);
+      else showResolved(firstIframeRef.current || waiting.shown);
+      return;
+    }
+    if (next && !userPickedRef.current && !isLoading && !streamInfo?.stream_url && activeSourceType !== 'local') {
+      setSelectedEmbed(next.embed_url); // the stored host failed: try the others now
+    }
+  }, [fallbackPlayers]);
 
   // Setup video source (Local disk stream vs HLS / MP4 online)
   useEffect(() => {
@@ -215,20 +324,34 @@ export default function VideoPlayerModal({
     if (!video) return;
 
     let hls = null;
+    let onCanPlay = null; // removed by the cleanup: a superseded source must never start playing again
 
     const tryPlay = () => {
       video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     };
 
+    // Same episode, new source (host pick, local/online toggle, HLS fallback): it starts at 0, so it seeks to where
+    // the old one was. sampleRef is null right after an episode switch, so this only acts within an episode.
+    const carryPosition = () => {
+      const pos = sampleRef.current?.pos || 0;
+      if (pos > 5 && !pendingSeekRef.current) {
+        pendingSeekRef.current = pos;
+        samplingRef.current = false;
+      }
+    };
+
     if (activeSourceType === 'local' && localFile) {
       const localStreamUrl = `/api/stream/local?file_path=${encodeURIComponent(localFile)}`;
-      if (video.src !== window.location.origin + localStreamUrl) {
+      // Compared with the URL last assigned: video.src is normalized (an apostrophe becomes %27) and never matches
+      if (localSrcRef.current !== localStreamUrl) {
+        carryPosition();
+        localSrcRef.current = localStreamUrl;
         video.src = localStreamUrl;
         video.load();
       }
       setIsLoading(false);
 
-      const onCanPlay = () => {
+      onCanPlay = () => {
         tryPlay();
         video.removeEventListener('canplay', onCanPlay);
       };
@@ -237,9 +360,12 @@ export default function VideoPlayerModal({
     } else if (streamInfo?.stream_url) {
       const targetStream = streamInfo.stream_url;
       const proxiedUrl = `/api/proxy/stream?url=${encodeURIComponent(targetStream)}`;
+      localSrcRef.current = null; // the local file (if any) is replaced
 
       if (Hls.isSupported() && (streamInfo.stream_type === 'm3u8' || targetStream.includes('.m3u8'))) {
+        carryPosition();
         hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+        hlsRef.current = hls;
         hls.loadSource(proxiedUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -249,6 +375,7 @@ export default function VideoPlayerModal({
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) {
             console.warn("HLS fatal error, falling back to direct play:", data);
+            carryPosition();
             video.src = proxiedUrl;
             video.load();
             setIsLoading(false);
@@ -256,9 +383,10 @@ export default function VideoPlayerModal({
           }
         });
       } else {
+        carryPosition();
         video.src = proxiedUrl;
         video.load();
-        const onCanPlay = () => {
+        onCanPlay = () => {
           setIsLoading(false);
           tryPlay();
           video.removeEventListener('canplay', onCanPlay);
@@ -269,7 +397,12 @@ export default function VideoPlayerModal({
     }
 
     return () => {
-      if (hls) hls.destroy();
+      // Already destroyed (and its media detached) when the episode switched
+      if (hls && hlsRef.current === hls) {
+        hls.destroy();
+        hlsRef.current = null;
+      }
+      if (onCanPlay) video.removeEventListener('canplay', onCanPlay);
     };
   }, [activeSourceType, localFile, streamInfo]);
 
@@ -278,8 +411,15 @@ export default function VideoPlayerModal({
     if (!videoRef.current || isScrubbing) return;
     setCurrentTime(videoRef.current.currentTime);
 
-    // Update buffered end
     const v = videoRef.current;
+    // Nothing is sampled while a resume seek is pending: position ~0 must never overwrite the stored one
+    const p = pendingSeekRef.current;
+    if (p && v.currentTime >= p - 2) pendingSeekRef.current = 0;
+    if (samplingRef.current && !pendingSeekRef.current && Number.isFinite(v.duration) && v.duration > 0 && v.currentTime > 5) {
+      sampleRef.current = { ...identityRef.current, pos: v.currentTime, dur: v.duration, savedPos: sampleRef.current?.savedPos };
+    }
+
+    // Update buffered end
     if (v.buffered && v.buffered.length > 0) {
       for (let i = 0; i < v.buffered.length; i++) {
         if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) {
@@ -292,44 +432,66 @@ export default function VideoPlayerModal({
 
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setDuration(videoRef.current.duration || 0);
-      videoRef.current.volume = volume;
-      videoRef.current.muted = isMuted;
-      videoRef.current.playbackRate = playbackSpeed;
+      const v = videoRef.current;
+      setDuration(v.duration || 0);
+      v.volume = volume;
+      v.muted = isMuted;
+      v.playbackRate = playbackSpeed;
+      samplingRef.current = true; // from now on this source's time belongs to the episode on screen
+      // Shelf resume: seek straight to the stored position
+      const target = pendingSeekRef.current;
+      if (target > 0 && Number.isFinite(v.duration) && target < v.duration - 5) {
+        v.currentTime = target;
+        setCurrentTime(target);
+      } else if (target > 0) {
+        pendingSeekRef.current = 0; // cannot seek there (past this file's end, or no duration): sampling must not stay blocked
+      }
     }
   };
 
-  // Periodic progress saving (every 5s)
+  // Saves the last sample with the identity it was taken for (a plain function: it only reads refs).
+  // Returns the request (never rejected), so the close can wait for the final save.
+  const flushSample = (keepalive = false) => {
+    const s = sampleRef.current;
+    if (!s || s.pos === s.savedPos) return Promise.resolve();
+    s.savedPos = s.pos;
+    return fetch('/api/history/progress', {
+      method: 'POST',
+      keepalive,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-ID': s.userId
+      },
+      body: JSON.stringify({
+        user_id: s.userId,
+        anime_title: s.animeTitle,
+        season: s.season,
+        ep_id: s.epId,
+        position_sec: s.pos,
+        duration_sec: s.dur,
+        cover: s.cover,
+        embed_url: s.embedUrl,
+        file_path: s.localFile,
+        ...historyContext(s)
+      })
+    }).catch(() => {});
+  };
+
+  // Periodic progress saving (every 5s), plus on pause, hidden tab, episode switch and close
   useEffect(() => {
     const interval = setInterval(() => {
-      if (videoRef.current && !videoRef.current.paused) {
-        const currentPos = videoRef.current.currentTime;
-        const totalDur = videoRef.current.duration;
-        if (currentPos > 5 && totalDur > 0) {
-          fetch('/api/history/progress', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-User-ID': userId
-            },
-            body: JSON.stringify({
-              user_id: userId,
-              anime_title: animeTitle,
-              season: season,
-              ep_id: epId,
-              position_sec: currentPos,
-              duration_sec: totalDur,
-              cover: cover || '',
-              embed_url: episode?.embed_url || episode?.url || '',
-              file_path: localFile || ''
-            })
-          }).catch(() => {});
-        }
-      }
+      if (videoRef.current && !videoRef.current.paused) flushSample();
     }, 5000);
-
     return () => clearInterval(interval);
-  }, [animeTitle, season, epId, userId, cover, episode, localFile]);
+  }, []);
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') flushSample(true);
+    };
+    document.addEventListener('visibilitychange', onHide);
+    return () => document.removeEventListener('visibilitychange', onHide);
+  }, []);
 
   // Auto-hide controls timer on mouse idle
   const handleMouseMove = () => {
@@ -498,21 +660,71 @@ export default function VideoPlayerModal({
     : -1;
   const hasNextEp = episodes && currentEpIndex !== -1 && currentEpIndex < episodes.length - 1;
 
+  // Identity of the episode on screen: every position sample carries the one it was taken for
+  useLayoutEffect(() => {
+    const episodeUrl = episode?.embed_url || episode?.url || '';
+    const playing = playingEmbedRef.current?.key === episodeKey ? playingEmbedRef.current.embed : '';
+    identityRef.current = {
+      userId,
+      animeTitle,
+      season,
+      epId,
+      cover: cover || '',
+      // The host that actually streamed, so a resume opens it first; VoirAnime keeps its episode page
+      // (its players and the history links are read from it)
+      embedUrl: (!episodeUrl.includes('voir-anime') && playing) || episodeUrl,
+      localFile: localFile || '',
+      epTitle: episode?.synthetic_title ? '' : (episode?.title || ''),
+      context,
+      // Only a complete season list knows which episode comes next
+      nextEp: context?.fullSeason && hasNextEp ? episodes[currentEpIndex + 1] : null
+    };
+  });
+
+  // Episode switch and close. Under StrictMode's mount/unmount/mount, sampleRef is still null: nothing is sent.
+  useLayoutEffect(() => {
+    samplingRef.current = false; // samples start with this episode's own metadata
+    sampleRef.current = null;
+    pendingSeekRef.current = autoResume && initialTime > 0 ? initialTime : 0;
+    playingEmbedRef.current = null;
+    // The previous source must neither report time nor start playing again for this episode: detached, not only paused.
+    // This runs before the passive effects, which attach this episode's source.
+    if (hlsRef.current) {
+      hlsRef.current.destroy(); // detaches its media
+      hlsRef.current = null;
+    }
+    const v = videoRef.current;
+    if (v) {
+      v.pause();
+      if (v.hasAttribute('src')) {
+        v.removeAttribute('src');
+        v.load();
+      }
+    }
+    localSrcRef.current = null;
+    return () => flushSample(true); // last sample of the previous episode
+  }, [episodeKey]);
+
   const handleEnded = () => {
+    flushSample();
+    // Either request may land first: both lead to "finished" (position >= 85 %, or the mark)
+    const id = identityRef.current;
     fetch('/api/history/toggle-watched', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-User-ID': userId
+        'X-User-ID': id.userId
       },
       body: JSON.stringify({
-        user_id: userId,
-        anime_title: animeTitle,
-        season: season,
-        ep_id: epId,
-        watched: true
+        user_id: id.userId,
+        anime_title: id.animeTitle,
+        season: id.season,
+        ep_id: id.epId,
+        cover: id.cover,
+        watched: true,
+        ...historyContext(id)
       })
-    });
+    }).catch(() => {});
 
     if (hasNextEp && onSelectNextEpisode) {
       onSelectNextEpisode(episodes[currentEpIndex + 1]);
@@ -631,7 +843,13 @@ export default function VideoPlayerModal({
             <Download size={14} /> Télécharger
           </button>
 
-          <button className="btn btn-icon btn-secondary" onClick={onClose} title="Fermer le lecteur (Échap)">
+          <button
+            className="btn btn-icon btn-secondary"
+            onClick={() => {
+              onClose(flushSample(true)); // App reloads the shelves once this last save is stored
+            }}
+            title="Fermer le lecteur (Échap)"
+          >
             <X size={18} />
           </button>
         </div>
@@ -669,7 +887,10 @@ export default function VideoPlayerModal({
           onLoadedMetadata={handleLoadedMetadata}
           onEnded={handleEnded}
           onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
+          onPause={() => {
+            setIsPlaying(false);
+            flushSample();
+          }}
         />
 
         {/* Loading Overlay */}
@@ -770,7 +991,8 @@ export default function VideoPlayerModal({
             </div>
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {episodes.map((ep, idx) => {
-                const isSelected = ep.num === episode.num || ep.title === episode.title;
+                // A hydrated list has int nums, a resumed episode a string one
+                const isSelected = (ep.num != null && String(ep.num) === String(episode.num)) || ep.title === episode.title;
                 return (
                   <button
                     key={idx}

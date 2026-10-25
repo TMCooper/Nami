@@ -53,7 +53,11 @@ def save_json(path: str, data: Any, indent: Optional[int] = 2):
 
     indent=None uses the C encoder (much faster for large stores).
     """
-    text = json.dumps(data, indent=indent, ensure_ascii=False)
+    save_json_text(path, json.dumps(data, indent=indent, ensure_ascii=False))
+
+
+def save_json_text(path: str, text: str):
+    """Atomic half of save_json, for callers that serialize themselves (e.g. on another thread)."""
     with _lock_for(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"

@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
+import WatchlistButton from './WatchlistButton';
 import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
 import { findHistoryEntries } from '../utils/titles';
+import { animeRef } from '../utils/animes';
 
 const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
 const VERSION_LABELS = { vostfr: 'VOSTFR', vf: 'VF' };
@@ -13,13 +15,16 @@ export default function AnimeDetailModal({
   onClose,
   onPlayEpisode,
   onDownloadEpisode,
-  onDownloadBulk
+  onDownloadBulk,
+  isInWatchlist = () => false,
+  onToggleWatchlist
 }) {
   const [details, setDetails] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [selectedSeasonKey, setSelectedSeasonKey] = useState(null);
-  const [activeVariant, setActiveVariant] = useState(null); // source + version actually served
+  const [activeVariant, setActiveVariant] = useState(null); // source + version actually served, with its season_key
+  const seasonRequestRef = useRef(0); // only the latest season request may fill the list
   const [episodes, setEpisodes] = useState([]);
   const [isLoadingEpisodes, setIsLoadingEpisodes] = useState(false);
   const [history, setHistory] = useState({});
@@ -40,7 +45,8 @@ export default function AnimeDetailModal({
   // Entity id of the clicked card; history/legacy links only know source + url + title
   const lookupEntityId = async () => {
     if (!anime?.url || !anime?.title) return null;
-    const params = new URLSearchParams({ source: anime.source || 'anime_sama', url: anime.url, title: anime.title });
+    // entry_title is the source entry's own title (what the lookup keys on), when the card knows it
+    const params = new URLSearchParams({ source: anime.source || 'anime_sama', url: anime.url, title: anime.entry_title || anime.title });
     const res = await fetch(`/api/anime/lookup?${params}`);
     if (!res.ok) return null;
     return (await res.json()).id;
@@ -85,6 +91,9 @@ export default function AnimeDetailModal({
   }, [anime, userId]);
 
   const selectSeason = (data, season, source, version, forceRefresh = false) => {
+    // A slow response of an earlier tap must not land under the tab clicked last
+    const request = ++seasonRequestRef.current;
+    const isLatest = () => request === seasonRequestRef.current;
     setSelectedSeasonKey(season.key);
     setIsLoadingEpisodes(true);
     setEpisodes([]);
@@ -92,15 +101,16 @@ export default function AnimeDetailModal({
     if (season.is_scans) {
       // Manga scans keep using YoitsuWrap Scan objects through /api/episodes
       const variant = season.variants.find((v) => v.version === 'scans') || season.variants[0];
-      setActiveVariant(variant);
+      setActiveVariant({ ...variant, season_key: season.key });
       fetch(`/api/episodes?season_url=${encodeURIComponent(variant.url)}&anime_title=${encodeURIComponent(variant.history_title)}&season_name=Scans&refresh=${forceRefresh}`)
         .then((res) => res.json())
         .then((res) => {
+          if (!isLatest()) return;
           setEpisodes(res.episodes || []);
           checkScansStatus(variant.history_title);
         })
         .catch((err) => console.error("Error loading scans:", err))
-        .finally(() => setIsLoadingEpisodes(false));
+        .finally(() => { if (isLatest()) setIsLoadingEpisodes(false); });
       return;
     }
 
@@ -108,12 +118,14 @@ export default function AnimeDetailModal({
     fetch(`/api/anime/${encodeURIComponent(data.id)}/episodes?${params}`)
       .then((res) => res.json())
       .then((res) => {
+        if (!isLatest()) return;
         setEpisodes(res.episodes || []);
-        setActiveVariant(res.variant || null);
+        // The season key travels with the variant of the same response: history writes pair them
+        setActiveVariant(res.variant ? { ...res.variant, season_key: res.season?.key || season.key } : null);
         if (res.variant) checkDownloadedStatus(res.variant.history_title, res.variant.season_name);
       })
       .catch((err) => console.error("Error loading episodes:", err))
-      .finally(() => setIsLoadingEpisodes(false));
+      .finally(() => { if (isLatest()) setIsLoadingEpisodes(false); });
   };
 
   const checkDownloadedStatus = (title, seasonName) => {
@@ -181,23 +193,34 @@ export default function AnimeDetailModal({
     historyEntries.filter(({ season, record }) => record.episodes?.[`${season}:${epNum}`]?.watched);
   const isEpisodeWatched = (epNum) => watchedEntries(epNum).length > 0;
 
-  const setWatched = (title, season, epNum, watched) =>
+  const setWatched = (title, season, epNum, watched, extra = {}) =>
     fetch('/api/history/toggle-watched', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-User-ID': userId
       },
-      body: JSON.stringify({ user_id: userId, anime_title: title, season, ep_id: String(epNum), watched })
+      body: JSON.stringify({ user_id: userId, anime_title: title, season, ep_id: String(epNum), watched, ...extra })
     });
 
   const toggleEpisodeWatched = (epNum, e) => {
     e.stopPropagation();
     const watchedIn = watchedEntries(epNum);
+    // The following episode of this complete list: the server proposes it next on the home shelf
+    const idx = episodes.findIndex((ep, i) => String(ep.num || ep.title || i + 1) === epNum);
+    const next = idx >= 0 ? episodes[idx + 1] : null;
+    const context = {
+      anime: animeRef(details),
+      season_key: activeVariant?.season_key,
+      source: activeVariant?.source,
+      version: activeVariant?.version,
+      cover: animeCover,
+      next_ep: next ? { ep_id: String(next.num || next.title || idx + 2), title: next.title || '' } : null
+    };
     // Unwatching clears every record that marks it; watching writes under the current key
     const requests = watchedIn.length
       ? watchedIn.map(({ title, season }) => setWatched(title, season, epNum, false))
-      : [setWatched(historyTitle, currentSeasonName, epNum, true)];
+      : [setWatched(historyTitle, currentSeasonName, epNum, true, context)];
     Promise.all(requests)
       .then(() => refreshHistory())
       .catch((err) => console.error("Error toggling watched:", err));
@@ -216,7 +239,12 @@ export default function AnimeDetailModal({
         anime_title: historyTitle,
         season: currentSeasonName,
         ep_ids: epIds,
-        watched: true
+        watched: true,
+        anime: animeRef(details),
+        season_key: activeVariant?.season_key,
+        source: activeVariant?.source,
+        version: activeVariant?.version,
+        cover: animeCover
       })
     })
       .then(() => refreshHistory())
@@ -247,6 +275,16 @@ export default function AnimeDetailModal({
   const isScanMode = Boolean(selectedSeason?.is_scans) || (episodes.length > 0 && episodes[0]?.is_scan);
   const synopsis = details?.synopsis;
   const allSources = details?.sources?.length ? details.sources : [{ source: anime.source }];
+  // What the player sends with its saves so the history record is linked to this entity and season variant
+  const playContext = details && activeVariant && activeVariant.version !== 'scans' ? {
+    anime: animeRef(details),
+    seasonKey: activeVariant.season_key, // from the response that gave this variant, never the tab clicked last
+    source: activeVariant.source,
+    version: activeVariant.version,
+    historyKeys: activeVariant.history_keys || [],
+    via: 'player',
+    fullSeason: true
+  } : null;
 
   return (
     <>
@@ -347,6 +385,15 @@ export default function AnimeDetailModal({
                         {details.alt_titles.slice(0, 3).join(' · ')}
                       </p>
                     )}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <WatchlistButton
+                      variant="pill"
+                      active={isInWatchlist(details || anime)}
+                      onToggle={() => onToggleWatchlist(details || anime)}
+                      disabled={!(details?.id || anime?.url)}
+                    />
                   </div>
 
                   {details?.genres?.length > 0 && (
@@ -620,7 +667,8 @@ export default function AnimeDetailModal({
                                   episodes,
                                   animeCover,
                                   0,
-                                  localInfo?.file_path
+                                  localInfo?.file_path,
+                                  playContext
                                 )}
                               >
                                 <Play size={12} fill="#fff" /> {isDownloaded ? "Lire Local" : "Lire"}

@@ -14,7 +14,8 @@
   --accent-cyan: #00B4D8;
   --accent-green: #2EA043;
   --accent-yellow: #D29922;
-  
+  --yt-red: #FF0000;
+
   --text-main: #F0F6FC;
   --text-muted: #8B949E;
   --text-dim: #6E7681;
@@ -185,4 +186,66 @@ body {
 
 .animate-spin {
   animation: spin 1s linear infinite;
+}
+
+/* Card controls (bookmark, info): always visible, bigger on touch screens */
+.card-action {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(13, 17, 23, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.card-action.active {
+  background: var(--primary);
+  border-color: transparent;
+}
+.card-action-flat {
+  background: transparent;
+  border-color: var(--border-color);
+  color: var(--text-muted);
+}
+.card-action:focus-visible,
+.continue-card:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+@media (pointer: coarse) {
+  .card-action {
+    width: 42px;
+    height: 42px;
+  }
+}
+
+/* Continue cards: hover effects only where a mouse hovers (never stuck after a tap) */
+.continue-thumb img {
+  transition: transform 0.3s ease;
+}
+/* Here, not inline: an inline opacity would always win over the hover rule below */
+.continue-play {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .card-action:hover {
+    background: rgba(13, 17, 23, 0.95);
+  }
+  .card-action.active:hover {
+    background: var(--primary-hover);
+  }
+  .continue-card:hover .continue-thumb img {
+    transform: scale(1.04);
+  }
+  .continue-card:hover .continue-play {
+    opacity: 1;
+  }
 }

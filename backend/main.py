@@ -164,6 +164,11 @@ async def lifespan(app: FastAPI):
     yield
 
     warm_up_task.cancel()
+    from backend.services.history_service import history_service
+    try:
+        await history_service.close()
+    except Exception as e:
+        print(f"[Nami] Final history flush failed: {e}")
     from backend.services.image_service import image_service
     from backend.routers.stream_proxy import close_stream_client
     from backend.yoitsu.gateway import yoitsu_gateway

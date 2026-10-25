@@ -202,6 +202,16 @@ class EntityIndex:
         wanted = self.aliases.find(key_from_entity_id(eid))
         return [e for e in self.all_entries() if self._cached_canonical(e) == wanted]
 
+    def members_of(self, keys: set) -> Dict[str, List[Entry]]:
+        """Entries of several entities in one pass (same canonical as entries_for). CPU-bound: run off the loop."""
+        out = {k: [] for k in keys}
+        if keys:
+            for e in self.all_entries():
+                k = self._cached_canonical(e)
+                if k in out:
+                    out[k].append(e)
+        return out
+
     def foreign_as_keys(self, canonical: str) -> set:
         """Anime-Sama page names that belong to other entities (never learned as aliases of this one)."""
         with self._lock:

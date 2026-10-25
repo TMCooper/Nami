@@ -16,7 +16,8 @@ from urllib.parse import unquote
 from backend.services.catalog_service import catalog_service
 from backend.services.settings_service import settings_service
 from backend.services.download_service import download_service, sanitize_filename, resolve_anime_folder
-from backend.services.history_service import history_service
+from backend.services.history_service import history_service, client_ref, SOURCES as HISTORY_SOURCES, VERSIONS as HISTORY_VERSIONS
+from backend.services.watchlist_service import watchlist_service, MAX_INPUT_ITEMS
 from backend.services.user_service import user_service
 from backend.services.cache_service import cache_service
 from backend.services.yoitsu_service import yoitsu_service
@@ -63,16 +64,37 @@ class BulkDownloadCreate(BaseModel):
     season: Optional[str] = "Saison 1"
     episodes: List[dict]
 
+class AnimeRefPayload(BaseModel):
+    id: Optional[str] = ""
+    title: Optional[str] = ""
+    source: Optional[str] = ""
+    url: Optional[str] = ""
+    entry_title: Optional[str] = ""
+    banner: Optional[str] = None
+    trailer: Optional[dict] = None
+
+class NextEpisodePayload(BaseModel):
+    ep_id: str
+    title: Optional[str] = ""
+
 class ProgressPayload(BaseModel):
     user_id: Optional[str] = "default"
     anime_title: str
     season: str
     ep_id: str
-    position_sec: float
-    duration_sec: float
+    # null when the player reports Infinity / NaN (live streams): treated as 0, never a 422
+    position_sec: Optional[float] = 0
+    duration_sec: Optional[float] = 0
     cover: Optional[str] = None
     embed_url: Optional[str] = None
     file_path: Optional[str] = None
+    anime: Optional[AnimeRefPayload] = None
+    season_key: Optional[str] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    ep_title: Optional[str] = None
+    next_ep: Optional[NextEpisodePayload] = None
+    link_via: Optional[str] = None
 
 class ToggleWatchedPayload(BaseModel):
     user_id: Optional[str] = "default"
@@ -80,6 +102,14 @@ class ToggleWatchedPayload(BaseModel):
     season: str
     ep_id: str
     watched: Optional[bool] = None
+    anime: Optional[AnimeRefPayload] = None
+    season_key: Optional[str] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    ep_title: Optional[str] = None
+    next_ep: Optional[NextEpisodePayload] = None
+    cover: Optional[str] = None
+    link_via: Optional[str] = None
 
 class MarkSeasonPayload(BaseModel):
     user_id: Optional[str] = "default"
@@ -87,6 +117,70 @@ class MarkSeasonPayload(BaseModel):
     season: str
     ep_ids: List[str]
     watched: Optional[bool] = True
+    anime: Optional[AnimeRefPayload] = None
+    season_key: Optional[str] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    cover: Optional[str] = None
+    link_via: Optional[str] = None
+
+class WatchlistAnimePayload(BaseModel):
+    id: Optional[str] = ""
+    title: str
+    source: str
+    url: str
+    entry_title: Optional[str] = ""
+    alt_titles: Optional[List[str]] = None
+    cover: Optional[str] = ""
+    cover_fallbacks: Optional[List[str]] = None
+    banner: Optional[str] = None
+    trailer: Optional[dict] = None
+    sources: Optional[List[dict]] = None
+
+class WatchlistPayload(BaseModel):
+    user_id: Optional[str] = "default"
+    anime: WatchlistAnimePayload
+    added_at: Optional[float] = None
+
+def _anime_ref(model: Optional[AnimeRefPayload]) -> Optional[dict]:
+    """Entity link sent with a history write; its lookup fallback is kept only for a real source entry."""
+    if not model or not (model.id or "").startswith("a-"):
+        return None
+    ref = model.model_dump()
+    if not yoitsu_gateway.valid_entry(ref["source"] or "", ref["url"] or ""):
+        ref.update(source="", url="", entry_title="")
+    return ref
+
+def _episode_context(payload) -> dict:
+    source, version = payload.source, payload.version
+    return {
+        "season_key": payload.season_key or None,
+        "source": source if source in HISTORY_SOURCES else None,
+        "version": version if version in HISTORY_VERSIONS else None,
+        "ep_title": getattr(payload, "ep_title", None),
+    }
+
+def _link_by(payload) -> str:
+    # A context handed out by /history/resume is the server's own guess: it never ranks as a user write
+    return "details" if payload.link_via == "resume" else "write"
+
+_link_tasks: set = set()
+_linking_users: set = set()
+
+async def _link_legacy_history(uid: str, pending: list):
+    try:
+        links = await asyncio.to_thread(yoitsu_gateway.infer_links, pending)
+        history_service.apply_links(uid, links)
+    except Exception as e:
+        print(f"[History] Legacy linking failed: {e}")
+    finally:
+        _linking_users.discard(uid)
+
+def _spawn_legacy_linking(uid: str, pending: list):
+    _linking_users.add(uid)
+    task = asyncio.create_task(_link_legacy_history(uid, pending))
+    _link_tasks.add(task)
+    task.add_done_callback(_link_tasks.discard)
 
 # --- User Auth & Accounts Routes ---
 @router.get("/users")
@@ -180,7 +274,7 @@ def _folder_size(base_dir: str) -> int:
 
 @router.get("/users/stats")
 async def get_user_stats(x_user_id: Optional[str] = Header("default")):
-    stats = history_service.get_user_stats(user_id=x_user_id or "default")
+    stats = history_service.get_user_stats(user_id=x_user_id or "default", canonical=yoitsu_gateway.canonical_id)
     # Also calculate local disk storage used
     root_folder = settings_service.get_root_folder()
     total_bytes = await asyncio.to_thread(_folder_size, os.path.join(root_folder, "nami", "anime"))
@@ -241,9 +335,18 @@ async def get_anime_entity(
     refresh: bool = Query(False, description="Forcer l'invalidation du cache"),
     x_user_id: Optional[str] = Header("default")
 ):
-    details = await yoitsu_gateway.details(entity_id, refresh=refresh, user_id=x_user_id or "default")
+    uid = x_user_id or "default"
+    details = await yoitsu_gateway.details(entity_id, refresh=refresh, user_id=uid)
     if not details:
         raise HTTPException(status_code=404, detail="Anime introuvable.")
+    try:
+        # Viewing an anime labels this profile's legacy records and heals its watchlist snapshot (never another profile's)
+        idents = await yoitsu_gateway.entry_idents(details)   # an equal id under another page is another work
+        history_service.link_titles(uid, yoitsu_gateway.anime_ref(details), yoitsu_gateway.history_claims(details),
+                                    canonical=yoitsu_gateway.canonical_id, idents=idents)
+        watchlist_service.refresh(uid, details, canonical=yoitsu_gateway.canonical_id, idents=idents)
+    except Exception as e:
+        print(f"[History] Linking from details failed: {e}")
     return details
 
 @router.get("/anime/{entity_id}/episodes")
@@ -557,12 +660,84 @@ async def delete_downloaded_anime(
 # --- Watch History & Progress Routes ---
 @router.get("/history")
 async def get_history(x_user_id: Optional[str] = Header("default")):
-    return history_service.get_history_for_client(user_id=x_user_id or "default")
+    return history_service.get_history_for_client(user_id=x_user_id or "default", canonical=yoitsu_gateway.canonical_id,
+                                                  media=yoitsu_gateway.anilist.cached)
 
 @router.get("/history/continue")
-async def get_continue_watching(x_user_id: Optional[str] = Header("default")):
-    items = history_service.get_continue_watching(user_id=x_user_id or "default")
-    return {"total": len(items), "results": items}
+async def get_continue_watching(limit: int = Query(20, ge=1, le=100), x_user_id: Optional[str] = Header("default")):
+    uid = x_user_id or "default"
+    if yoitsu_gateway.index.catalog_loaded and uid not in _linking_users:
+        pending = history_service.unlinked_titles(uid)
+        if pending:
+            _spawn_legacy_linking(uid, pending)  # links show up on the next load, never awaited here
+    items = history_service.get_continue_watching(uid, canonical=yoitsu_gateway.canonical_id, media=yoitsu_gateway.anilist.cached)
+    return {"total": len(items), "results": items[:limit]}
+
+@router.get("/history/resume")
+async def resume_history(
+    anime_title: str = Query(..., description="Titre de l'enregistrement d'historique"),
+    season: str = Query(..., description="Nom de saison de l'historique (ex: Saison 1 VF)"),
+    x_user_id: Optional[str] = Header("default")
+):
+    """Strict resume target of a history record: its linked entity, season variant and episode list."""
+    uid = x_user_id or "default"
+    key, record = history_service.find_record(uid, anime_title)
+    ref = (record or {}).get("anime") or {}
+    if not ref.get("id"):
+        raise HTTPException(status_code=404, detail="Reprise introuvable.")
+    eid = await yoitsu_gateway.live_id(ref)
+    if not eid:
+        raise HTTPException(status_code=404, detail="Reprise introuvable.")
+    if eid != ref["id"]:
+        # Before reading the mapping: relabel drops the old entity's season keys, so it goes through relink()
+        history_service.relabel(uid, key, eid)
+
+    async def relink(anime_id: str):
+        # Season mapping from details claims (explicit tap only: no recents)
+        details = await yoitsu_gateway.details(anime_id, user_id=uid, track_recent=False)
+        if details:
+            history_service.link_titles(uid, yoitsu_gateway.anime_ref(details), yoitsu_gateway.history_claims(details),
+                                        canonical=yoitsu_gateway.canonical_id,
+                                        idents=await yoitsu_gateway.entry_idents(details))
+
+    async def season_episodes(anime_id: str):
+        target = (record.get("seasons") or {}).get(season)
+        if not isinstance(target, dict):
+            return None, None
+        result = await yoitsu_gateway.episodes(anime_id, season=target.get("key") or "", source=target.get("source") or "",
+                                               version=target.get("version") or "vostfr")
+        return target, result
+
+    relinked = False
+    if not isinstance((record.get("seasons") or {}).get(season), dict):
+        await relink(eid)
+        relinked = True
+    target, result = await season_episodes(eid)
+    if result is None and not relinked:
+        # The stored season key vanished (relabelled entity): refresh the mapping once
+        await relink(eid)
+        target, result = await season_episodes(eid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Reprise introuvable.")
+    trusted = True
+    if result["anime_id"] != eid:
+        # Another entity answered: the list was fetched with a season key the old one issued. Relabel (which drops
+        # the mapping), relink and retry once; a list that still comes from a stale key is never reported exact
+        stale = target, result
+        eid = result["anime_id"]
+        history_service.relabel(uid, key, eid)
+        await relink(eid)
+        target, result = await season_episodes(eid)
+        trusted = result is not None and result["anime_id"] == eid
+        if result is None:
+            target, result = stale
+    variant = result["variant"]
+    return {
+        **result,
+        "anime": client_ref(record["anime"], yoitsu_gateway.canonical_id, yoitsu_gateway.anilist.cached),
+        "total": len(result["episodes"]),
+        "exact": trusted and variant["source"] == target["source"] and variant["version"] == target["version"],
+    }
 
 @router.post("/history/progress")
 async def save_progress(payload: ProgressPayload, x_user_id: Optional[str] = Header(None)):
@@ -576,7 +751,12 @@ async def save_progress(payload: ProgressPayload, x_user_id: Optional[str] = Hea
         duration_sec=payload.duration_sec,
         cover=payload.cover,
         embed_url=payload.embed_url,
-        file_path=payload.file_path
+        file_path=payload.file_path,
+        anime=_anime_ref(payload.anime),
+        context=_episode_context(payload),
+        next_ep=payload.next_ep.model_dump() if payload.next_ep else None,
+        link_by=_link_by(payload),
+        canonical=yoitsu_gateway.canonical_id
     )
     return res
 
@@ -588,7 +768,13 @@ async def toggle_watched(payload: ToggleWatchedPayload, x_user_id: Optional[str]
         anime_title=payload.anime_title,
         season=payload.season,
         ep_id=payload.ep_id,
-        is_watched=payload.watched
+        is_watched=payload.watched,
+        anime=_anime_ref(payload.anime),
+        context=_episode_context(payload),
+        next_ep=payload.next_ep.model_dump() if payload.next_ep else None,
+        cover=payload.cover,
+        link_by=_link_by(payload),
+        canonical=yoitsu_gateway.canonical_id
     )
     return {"watched": is_watched}
 
@@ -600,7 +786,12 @@ async def mark_season(payload: MarkSeasonPayload, x_user_id: Optional[str] = Hea
         anime_title=payload.anime_title,
         season=payload.season,
         ep_ids=payload.ep_ids,
-        is_watched=payload.watched
+        is_watched=payload.watched,
+        anime=_anime_ref(payload.anime),
+        context=_episode_context(payload),
+        cover=payload.cover,
+        link_by=_link_by(payload),
+        canonical=yoitsu_gateway.canonical_id
     )
     return {"status": "ok"}
 
@@ -617,6 +808,49 @@ async def delete_history_item(
 async def clear_history(x_user_id: Optional[str] = Header("default")):
     history_service.clear_user_history(x_user_id or "default")
     return {"status": "ok"}
+
+# --- Watchlist (« À regarder plus tard ») ---
+def _watchlist_response(uid: str) -> dict:
+    # Every route returns the server list: the client sets it as the truth without a second GET
+    items = watchlist_service.get_items_for_client(uid, canonical=yoitsu_gateway.canonical_id)
+    return {"total": len(items), "results": items}
+
+@router.get("/watchlist")
+async def get_watchlist(x_user_id: Optional[str] = Header("default")):
+    return _watchlist_response(x_user_id or "default")
+
+@router.post("/watchlist")
+async def add_to_watchlist(payload: WatchlistPayload, x_user_id: Optional[str] = Header(None)):
+    uid = x_user_id or payload.user_id or "default"
+    if uid != "default" and uid not in user_service.users:
+        # Never a bucket for an id no profile owns (the store would grow with any header value)
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+    anime = payload.anime.model_dump()
+    if not anime["title"].strip() or not yoitsu_gateway.valid_entry(anime["source"], anime["url"]):
+        raise HTTPException(status_code=400, detail="Anime invalide.")
+    anime["sources"] = [s for s in (anime.get("sources") or [])[:MAX_INPUT_ITEMS] if isinstance(s, dict)
+                        and isinstance(s.get("source"), str) and isinstance(s.get("url"), str)
+                        and yoitsu_gateway.valid_entry(s["source"], s["url"])]
+    if not (anime["id"] or "").startswith("a-"):
+        entity = await yoitsu_gateway.lookup(anime["source"], anime["url"], anime["entry_title"] or anime["title"])
+        anime["id"] = entity["id"] if entity else ""
+    if not watchlist_service.add(uid, anime, payload.added_at, canonical=yoitsu_gateway.canonical_id):
+        raise HTTPException(status_code=400, detail="Anime invalide.")
+    return _watchlist_response(uid)
+
+@router.delete("/watchlist")
+async def remove_from_watchlist(
+    anime_id: str = Query("", alias="id", description="Identifiant de l'anime"),
+    source: str = Query("", description="Source de l'entrée principale"),
+    url: str = Query("", description="URL de l'entrée principale"),
+    x_user_id: Optional[str] = Header("default")
+):
+    # Query parameters, not a path: ids are percent-encoded
+    if not anime_id and not (source and url):
+        raise HTTPException(status_code=400, detail="Anime invalide.")
+    uid = x_user_id or "default"
+    watchlist_service.remove(uid, anime_id=anime_id, source=source, url=url, canonical=yoitsu_gateway.canonical_id)
+    return _watchlist_response(uid)
 
 
 # --- Settings & Download Routes ---

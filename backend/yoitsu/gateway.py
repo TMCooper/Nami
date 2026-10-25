@@ -13,14 +13,15 @@ import os
 import re
 import time
 import asyncio
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 
 from backend.services.cache_service import cache_service
 from backend.services.catalog_service import catalog_service, get_canonical_search_queries, CatalogService, SEARCH_COVER_WAIT
-from backend.services.cover_utils import client_cover_url, is_usable_cover, is_trusted_cover, raw_cover_url
+from backend.services.anime_refs import primary_ident
+from backend.services.cover_utils import client_cover_url, is_usable_cover, is_trusted_cover, raw_cover_url, url_host
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.aliases import AliasIndex
 from backend.yoitsu.anilist import AniListClient, media_titles
@@ -43,6 +44,8 @@ ENRICH_PER_SEARCH = 4
 MAX_AS_PAGES = 3
 FLUSH_DELAY = 10.0
 SYNOPSIS_STUB = re.compile(r"^saison\s+\d+\s+de\b", re.IGNORECASE)
+AS_COVER_SLUG = re.compile(r"/Anime-Sama/IMG/(?:img/)?contenu/([A-Za-z0-9-]+)\.(?:jpe?g|png|webp)", re.IGNORECASE)
+VA_EPISODE_PATH = re.compile(r"^/anime/([^/]+)/[^/]+")   # /anime/<post slug>/<episode slug>/
 
 
 def learnable_keys(titles) -> set:
@@ -76,6 +79,10 @@ def _vf_url(url: str) -> str:
 
 def _dedup(items) -> list:
     return list(dict.fromkeys(i for i in items if i))
+
+
+def _compact(key: str) -> str:
+    return key.replace(" ", "")   # the Anime-Sama catalogue strips ':' ('ReZero' vs 'Re:Zero')
 
 
 class YoitsuGateway:
@@ -279,8 +286,10 @@ class YoitsuGateway:
 
     @staticmethod
     def valid_entry(source: str, url: str) -> bool:
-        host = (urlparse(url or "").hostname or "").lower()
-        return source in SOURCES and url.startswith(("http://", "https://")) and SOURCE_HOSTS[source] in host
+        if not isinstance(source, str) or not isinstance(url, str) or source not in SOURCES:
+            return False
+        host = url_host(url)  # None: unparsable ('https://[bad'), never a source page
+        return host is not None and url.startswith(("http://", "https://")) and SOURCE_HOSTS[source] in host
 
     async def lookup(self, source: str, url: str, title: str) -> Optional[dict]:
         """Entity of one source entry (history / legacy links only know source + url + title)."""
@@ -293,6 +302,144 @@ class YoitsuGateway:
         key = self.index.canonical_key(entry)
         members = await asyncio.to_thread(self.index.entries_for, entity_id(key))
         return self.client_entity(build_entity(key, members or [entry]))
+
+    # --- history & watchlist links ---
+    def canonical_id(self, eid: str) -> str:
+        """Current id of a stored entity id: follows learned aliases (cheap, no index scan)."""
+        if eid and eid.startswith("a-"):
+            return entity_id(self.aliases.find(key_from_entity_id(eid)))
+        return eid or ""
+
+    @staticmethod
+    def anime_ref(details: dict) -> dict:
+        """What a history record keeps of client details: the id, plus the source entry lookup() can rebuild it from."""
+        sources = details.get("sources") or []
+        primary_title = sources[0].get("title") if sources and isinstance(sources[0], dict) else ""
+        return {
+            "id": details["id"],
+            "title": details.get("title") or "",
+            "source": details.get("source") or "",
+            "url": details.get("url") or "",
+            "entry_title": primary_title or details.get("title") or "",
+            "banner": raw_cover_url(details.get("banner") or "") or None,
+            "trailer": details.get("trailer"),
+        }
+
+    @staticmethod
+    def history_claims(details: dict) -> Dict[Tuple[str, str], List[dict]]:
+        """Legacy history (title key, season name) -> the season variants that write under it."""
+        claims: Dict[Tuple[str, str], List[dict]] = {}
+        for season in details.get("seasons") or []:
+            if season.get("is_scans"):
+                continue
+            for v in season.get("variants") or []:
+                if v.get("version") not in ("vostfr", "vf"):
+                    continue
+                claim = {"key": season["key"], "source": v["source"], "version": v["version"]}
+                for k in v.get("history_keys") or []:
+                    slot = claims.setdefault((title_key(k["title"]), k["season"]), [])
+                    if claim not in slot:
+                        slot.append(claim)
+        return claims
+
+    async def entry_idents(self, details: dict) -> set:
+        """'source:slug' of every entry an entity's details describe: its sources and every known member.
+
+        A stored ref whose primary entry is not among them names another work, even under the same id.
+        """
+        refs = [details, *(details.get("sources") or [])]
+        idents = {primary_ident(r) for r in refs if isinstance(r, dict)}
+        members = await asyncio.to_thread(self.index.entries_for, details.get("id") or "")
+        idents |= {f"{m.source}:{m.slug}" for m in members}   # a sequel post is a member, not a listed source
+        return idents - {""}
+
+    def _entry_key(self, source: str, url: str) -> Optional[str]:
+        """Canonical key of a stored source entry the index knows, without remembering anything.
+
+        None for an unknown entry: no entity's details contain it, so its key could not be served
+        (the lookup fallback of live_id remembers it when the stored id is dead).
+        """
+        if not self.valid_entry(source, url):
+            return None
+        known = self.index.entry((source, slug_of(url)))
+        return self.index._cached_canonical(known) if known else None
+
+    async def live_id(self, ref: dict) -> Optional[str]:
+        """Id a stored link resolves to today: its source entry's entity, else its canonical id (index only, no network)."""
+        eid = self.canonical_id(ref.get("id") or "")
+        source = ref.get("source") or ""
+        # VoirAnime keys need catalogue sibling evidence ('... Ii' joins its franchise only then);
+        # Anime-Sama page keys do not
+        key = self._entry_key(source, ref.get("url") or "") if self.index.catalog_loaded or source == "anime_sama" else None
+        if key is not None and entity_id(key) != eid:
+            # The source entry is the stable identity: a homonymous page can take over the stored id
+            return entity_id(key)
+        if eid and await asyncio.to_thread(self.index.entries_for, eid):
+            return eid
+        entity = await self.lookup(ref.get("source") or "", ref.get("url") or "", ref.get("entry_title") or ref.get("title") or "")
+        return entity["id"] if entity else None
+
+    def infer_links(self, items: List[Tuple[str, str, List[str]]]) -> Dict[str, dict]:
+        """Links of legacy history titles from the index alone. CPU-bound: run off the loop.
+
+        Deterministic and conservative: a played VoirAnime post first, else exactly one entity named
+        like the title. An Anime-Sama cover slug breaks ties between named entities and never overrides
+        disagreeing names; alone, it only links a record without VoirAnime playback (old builds stored
+        fuzzy Anime-Sama art as VoirAnime covers). Canonical keys need catalogue sibling evidence, hence
+        the catalog_loaded gate. Keys come from the locked cache (set_catalog may run in another thread).
+        """
+        if not self.index.catalog_loaded or not items:
+            return {}
+        va_by_name: Dict[str, List[Entry]] = {}
+        as_by_name: Dict[str, List[Entry]] = {}
+        for e in self.index.all_entries():
+            if e.source == "voiranime":
+                # A legacy VoirAnime title is legacy_title_from_url(slug): its key is exactly this
+                va_by_name.setdefault(e.slug.replace("-", " "), []).append(e)
+            elif e.source == "anime_sama":
+                as_by_name.setdefault(_compact(title_key(split_version(e.title)[0])), []).append(e)
+
+        accepted = []
+        for title, cover, urls in items:
+            tk = title_key(title)
+            va_url, as_cover = self._url_evidence(cover, urls)
+            if va_url:
+                keys = {self.index._cached_canonical(e) for e in va_url}
+                if len(keys) == 1:
+                    accepted.append((title, keys.pop(), va_url[0]))
+                continue
+            by_key: Dict[str, Entry] = {}
+            for e in va_by_name.get(tk, []) + as_by_name.get(_compact(tk), []):
+                by_key.setdefault(self.index._cached_canonical(e), e)
+            if len(by_key) == 1:
+                key, entry = next(iter(by_key.items()))
+                accepted.append((title, key, entry))
+            elif as_cover is not None:
+                key = self.index._cached_canonical(as_cover)
+                # Episode urls of unknown posts: a VoirAnime record, retried after LINK_RETRY, never linked by its cover
+                if key in by_key or (not by_key and not urls):
+                    accepted.append((title, key, as_cover))
+
+        members = self.index.members_of({key for _, key, _ in accepted})
+        links = {}
+        for title, key, entry in accepted:
+            entity = build_entity(key, members.get(key) or [entry])
+            # The evidence entry is the lookup fallback: lookup(entry) reproduces this key
+            links[title] = {"id": entity_id(key), "title": entity["title"], "source": entry.source, "url": entry.url,
+                            "entry_title": entry.title, "banner": None, "trailer": None}
+        return links
+
+    def _url_evidence(self, cover: str, urls: List[str]) -> Tuple[List[Entry], Optional[Entry]]:
+        """(VoirAnime posts named by episode urls, Anime-Sama page named by an IMG cover slug), known entries only."""
+        posts: List[Entry] = []
+        for url in urls or []:
+            match = VA_EPISODE_PATH.match(urlparse(url or "").path)
+            entry = self.index.entry(("voiranime", match.group(1).lower())) if match else None
+            if entry and all(p.ident != entry.ident for p in posts):
+                posts.append(entry)
+        match = AS_COVER_SLUG.search(raw_cover_url(cover or ""))
+        as_entry = self.index.entry(("anime_sama", match.group(1).lower())) if match else None
+        return posts, as_entry
 
     def _enrich_in_background(self, entities: list):
         if not self.anilist.enabled or self.anilist.busy():
@@ -639,7 +786,7 @@ class YoitsuGateway:
             or (usable or variants)[0]
         )
         result = {"season": {"key": season_obj["key"], "label": season_obj["label"]}, "variant": variant,
-                  "is_scans": variant["version"] == "scans", "episodes": []}
+                  "is_scans": variant["version"] == "scans", "episodes": [], "anime_id": details["id"]}
         if result["is_scans"]:
             return result  # scans keep using /api/episodes (YoitsuWrap Scan objects)
 

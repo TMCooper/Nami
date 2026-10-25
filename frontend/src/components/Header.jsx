@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Search, Download, Settings, RefreshCw, Layers, History, BarChart3, HardDrive } from 'lucide-react';
 
 export default function Header({ 
@@ -14,33 +14,55 @@ export default function Header({
   onOpenSettings,
   onOpenStats,
   currentUser,
-  onOpenAuth
+  onOpenAuth,
+  onApisReady
 }) {
   const [catalogStatus, setCatalogStatus] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const apisReadyRef = useRef(null);
+  const onApisReadyRef = useRef(onApisReady);
+  onApisReadyRef.current = onApisReady;
 
   useEffect(() => {
+    let timer = null;
+    let cancelled = false;
     const checkStatus = () => {
       fetch('/api/catalog/status')
         .then((res) => res.json())
         .then((data) => {
           setCatalogStatus(data);
           setIsRefreshing(Boolean(data.is_updating));
+          // The server answers before the scraper APIs are up: reload once they are
+          if (data.apis_ready === true && apisReadyRef.current === false) {
+            onApisReadyRef.current?.();
+          }
+          if (typeof data.apis_ready === 'boolean') apisReadyRef.current = data.apis_ready;
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) timer = setTimeout(checkStatus, apisReadyRef.current === false ? 3000 : 12000);
+        });
     };
 
     checkStatus();
-    const interval = setInterval(checkStatus, 12000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
 
   const handleRefreshCatalog = () => {
     setIsRefreshing(true);
     fetch(`/api/catalog/update?source=${activeSource}`, { method: 'POST' })
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => setCatalogStatus(data))
-      .catch((err) => console.error("Error launching refresh:", err));
+      .catch((err) => {
+        console.error("Error launching refresh:", err);
+        setIsRefreshing(false);
+      });
   };
 
   const handleKeyDown = (e) => {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, HardDrive, BookOpen } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
-import { DEFAULT_ANIME_COVER } from './CatalogGrid';
+import { DEFAULT_ANIME_COVER } from '../utils/placeholders';
 
 export default function AnimeDetailModal({
   currentUser,
@@ -195,7 +195,8 @@ export default function AnimeDetailModal({
 
   const currentSeasonName = selectedSeason?.name || 'Saison 1';
   const animeTitle = details?.title || anime.title;
-  const animeCover = details?.cover || anime.cover || DEFAULT_ANIME_COVER;
+  // Real cover only: the placeholder must never be sent to the history as a cover
+  const animeCover = details?.cover || anime.cover || '';
   const isScanMode = currentSeasonName?.toLowerCase() === 'scans' || (episodes.length > 0 && episodes[0]?.is_scan);
 
   return (
@@ -251,7 +252,7 @@ export default function AnimeDetailModal({
               {/* Header Info */}
               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
                 <img
-                  src={animeCover}
+                  src={animeCover || DEFAULT_ANIME_COVER}
                   alt={animeTitle}
                   onError={(e) => {
                     e.target.src = DEFAULT_ANIME_COVER;

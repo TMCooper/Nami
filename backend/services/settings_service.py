@@ -1,5 +1,5 @@
 import os
-import json
+from backend.services.storage import load_json, save_json
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
@@ -17,16 +17,9 @@ class SettingsService:
         self.settings = self._load()
 
     def _load(self):
-        if os.path.exists(SETTINGS_FILE):
-            try:
-                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Merge with default settings
-                    merged = {**DEFAULT_SETTINGS, **data}
-                    return merged
-            except Exception as e:
-                print(f"[Settings] Error loading settings: {e}")
-        return DEFAULT_SETTINGS.copy()
+        data = load_json(SETTINGS_FILE, dict)
+        # Merge with default settings
+        return {**DEFAULT_SETTINGS, **(data if isinstance(data, dict) else {})}
 
     def get_settings(self):
         return self.settings
@@ -39,8 +32,7 @@ class SettingsService:
                 path = "/downloads"
             self.settings["root_folder"] = path
             
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.settings, f, indent=4, ensure_ascii=False)
+        save_json(SETTINGS_FILE, self.settings, indent=4)
         return self.settings
 
     def get_root_folder(self) -> str:

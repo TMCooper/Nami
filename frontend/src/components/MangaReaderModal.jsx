@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { DEFAULT_PAGE_IMAGE } from '../utils/placeholders';
 import { 
   X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize, 
   Minimize, BookOpen, Layers, Check, Loader2, Bookmark 
@@ -177,7 +178,7 @@ export default function MangaReaderModal({
   const formatImageUrl = (url) => {
     if (!url) return '';
     if (url.startsWith('http')) {
-      return `/api/proxy/image?url=${encodeURIComponent(url)}`;
+      return `/api/img?url=${encodeURIComponent(url)}`;
     }
     return `/api/stream/local?file_path=${encodeURIComponent(url)}`;
   };
@@ -394,7 +395,7 @@ export default function MangaReaderModal({
               onLoad={() => setIsImageLoading(false)}
               onError={(e) => {
                 setIsImageLoading(false);
-                e.target.src = 'https://via.placeholder.com/800x1200/0d1117/8b949e?text=Image+Indisponible';
+                if (e.target.src !== DEFAULT_PAGE_IMAGE) e.target.src = DEFAULT_PAGE_IMAGE;
               }}
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -480,7 +481,7 @@ export default function MangaReaderModal({
                     boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
                   }}
                   onError={(e) => {
-                    e.target.src = 'https://via.placeholder.com/800x1200/0d1117/8b949e?text=Image+Indisponible';
+                    if (e.target.src !== DEFAULT_PAGE_IMAGE) e.target.src = DEFAULT_PAGE_IMAGE;
                   }}
                 />
                 <span style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: '6px' }}>

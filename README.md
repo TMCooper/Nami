@@ -81,6 +81,16 @@ npm install
 npm run dev
 ```
 
+#### Tests (backend) :
+```bash
+pip install pytest flask
+python -m pytest
+```
+Les tests n'écrivent que dans des dossiers temporaires (jamais dans `data/`).
+
+#### Journaux des APIs :
+Les sorties d'AnimeSamaApi et de VoirAnime_API sont dans `data/logs/animesama.log` et `data/logs/voiranime.log` (le lancement précédent est conservé en `.log.1`).
+
 ---
 
 ## 🏗️ Architecture du Projet

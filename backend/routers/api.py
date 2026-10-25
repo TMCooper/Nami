@@ -2,10 +2,11 @@ import os
 import re
 import shutil
 import base64
+import asyncio
+import threading
 import mimetypes
 import hashlib
 import subprocess
-import httpx
 from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response, FileResponse
 from pydantic import BaseModel
@@ -19,6 +20,18 @@ from backend.services.history_service import history_service
 from backend.services.user_service import user_service
 from backend.services.cache_service import cache_service
 from backend.services.yoitsu_service import yoitsu_service
+from backend.services.net_safety import resolve_media_path, media_root
+
+SCANS_TIMEOUT = 120.0
+
+
+def _media_path_or_404(file_path: str, kind: str = "Fichier") -> str:
+    """Only files under {root_folder}/nami can be streamed, thumbnailed or deleted."""
+    decoded_path = unquote(file_path).strip()
+    real_path = resolve_media_path(decoded_path, settings_service.get_root_folder())
+    if not real_path or not os.path.exists(real_path):
+        raise HTTPException(status_code=404, detail=f"{kind} introuvable sur le disque.")
+    return real_path
 
 router = APIRouter(prefix="/api", tags=["Nami API"])
 
@@ -152,12 +165,7 @@ async def delete_user(user_id: str):
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
     return {"status": "ok", "message": f"Utilisateur {user_id} et toutes ses données supprimés."}
 
-@router.get("/users/stats")
-async def get_user_stats(x_user_id: Optional[str] = Header("default")):
-    stats = history_service.get_user_stats(user_id=x_user_id or "default")
-    # Also calculate local disk storage used
-    root_folder = settings_service.get_root_folder()
-    base_dir = os.path.join(root_folder, "nami", "anime")
+def _folder_size(base_dir: str) -> int:
     total_bytes = 0
     if os.path.exists(base_dir):
         for root, _, files in os.walk(base_dir):
@@ -166,6 +174,14 @@ async def get_user_stats(x_user_id: Optional[str] = Header("default")):
                     total_bytes += os.path.getsize(os.path.join(root, f))
                 except Exception:
                     pass
+    return total_bytes
+
+@router.get("/users/stats")
+async def get_user_stats(x_user_id: Optional[str] = Header("default")):
+    stats = history_service.get_user_stats(user_id=x_user_id or "default")
+    # Also calculate local disk storage used
+    root_folder = settings_service.get_root_folder()
+    total_bytes = await asyncio.to_thread(_folder_size, os.path.join(root_folder, "nami", "anime"))
     total_mb = round(total_bytes / (1024 * 1024), 1)
     total_gb = round(total_mb / 1024, 2)
     stats["storage_used"] = f"{total_gb} Go" if total_gb >= 1.0 else f"{total_mb} Mo"
@@ -187,8 +203,20 @@ async def get_random_catalog(count: int = Query(12, ge=1, le=50)):
 
 @router.get("/catalog/recent")
 async def get_recent_animes(x_user_id: Optional[str] = Header("default")):
-    recents = cache_service.get_recent_animes(user_id=x_user_id or "default")
+    uid = x_user_id or "default"
+    recents = cache_service.get_recent_animes(user_id=uid)
+    if cache_service.recents_missing_cover(uid):
+        # Never resolve covers inside the request: they appear on the next load
+        catalog_service._spawn(catalog_service.repair_recent_covers(uid))
     return {"total": len(recents), "results": recents}
+
+@router.get("/catalog/status")
+async def get_catalog_status():
+    return await catalog_service.get_update_status()
+
+@router.post("/catalog/update")
+async def trigger_catalog_update(source: str = Query("all", description="'all', 'anime_sama' ou 'voiranime'")):
+    return await catalog_service.trigger_update(source=source)
 
 @router.get("/details")
 async def get_details(
@@ -213,8 +241,8 @@ async def get_season_episodes(
     # Check if this is a manga scans request via YoitsuWrap
     if (season_name and season_name.lower() == "scans") or ("scans" in season_url.lower()):
         manga_name = anime_title or season_url.rstrip("/").split("/")[-1].replace("-", " ")
-        chapters = yoitsu_service.get_chapters_summary(manga_name)
-        local_status = yoitsu_service.get_downloaded_chapters_status(manga_name)
+        chapters = await _scans_summary(manga_name)
+        local_status = await asyncio.to_thread(yoitsu_service.get_downloaded_chapters_status, manga_name)
 
         episodes = []
         for ch in chapters:
@@ -245,7 +273,8 @@ async def get_season_episodes(
         return {"total": len(episodes), "episodes": episodes, "is_scans": True}
 
     if "voir-anime" in season_url:
-        va_details = await catalog_service.get_details(url=season_url, source="voiranime", refresh=refresh)
+        # Loading a season tab is not "viewing an anime": keep it out of the recents shelf
+        va_details = await catalog_service.get_details(url=season_url, source="voiranime", refresh=refresh, track_recent=False)
         episodes = va_details.get("episodes", [])
     else:
         episodes = await catalog_service.fetch_anime_sama_episodes(
@@ -261,9 +290,17 @@ class DownloadScanPayload(BaseModel):
     anime_title: str
     chapter_num: Optional[int] = None
 
+async def _scans_summary(manga_name: str) -> list:
+    """YoitsuWrap scans use blocking requests without timeouts: run them off the event loop, bounded."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(yoitsu_service.get_chapters_summary, manga_name), timeout=SCANS_TIMEOUT)
+    except asyncio.TimeoutError:
+        print(f"[API] Scans lookup timed out for '{manga_name}'")
+        return []
+
 @router.get("/scans")
 async def get_scans_list(anime_title: str = Query(...)):
-    chapters = yoitsu_service.get_chapters_summary(anime_title)
+    chapters = await _scans_summary(anime_title)
     return {"title": anime_title, "total": len(chapters), "chapters": chapters}
 
 @router.post("/scans/download")
@@ -280,37 +317,10 @@ async def download_scan_endpoint(payload: DownloadScanPayload):
 @router.get("/scans/status")
 async def get_scans_status(anime_title: str = Query(...)):
     """Checks disk for downloaded chapters of a manga."""
-    status_dict = yoitsu_service.get_downloaded_chapters_status(anime_title)
+    status_dict = await asyncio.to_thread(yoitsu_service.get_downloaded_chapters_status, anime_title)
     return {"anime_title": anime_title, "downloaded_chapters": status_dict}
 
-@router.get("/proxy/image")
-async def proxy_image(url: str = Query(...)):
-    """Proxies manga scan images with necessary referrer headers to bypass anti-hotlinking."""
-    decoded_url = unquote(url).strip()
-    if not decoded_url.startswith("http"):
-        raise HTTPException(status_code=400, detail="Invalid image URL")
-
-    referer = "https://anime-sama.to/"
-    if "voir-anime" in decoded_url or "voiranime" in decoded_url:
-        referer = "https://voir-anime.to/"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": referer,
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(decoded_url, headers=headers)
-            content_type = resp.headers.get("content-type", "image/jpeg")
-            if resp.status_code == 200 and not resp.content.startswith(b"<!DOCTYPE") and not resp.content.startswith(b"<html"):
-                return Response(content=resp.content, media_type=content_type, headers={
-                    "Cache-Control": "public, max-age=86400"
-                })
-            raise HTTPException(status_code=resp.status_code, detail="Invalid image content or blocked")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error proxying image: {e}")
+# Image proxy: see backend/routers/stream_proxy.py (/api/img, legacy /api/proxy/image)
 
 @router.get("/resolve")
 async def resolve_stream(
@@ -323,9 +333,8 @@ async def resolve_stream(
 # --- Local File Video Streaming with HTTP 206 Partial Content (Range) ---
 @router.get("/stream/local")
 async def stream_local_video(file_path: str = Query(..., description="Chemin du fichier vidéo local"), request: Request = None):
-    decoded_path = unquote(file_path).strip()
-    
-    if not os.path.exists(decoded_path) or not os.path.isfile(decoded_path):
+    decoded_path = _media_path_or_404(file_path, "Fichier vidéo local")
+    if not os.path.isfile(decoded_path):
         raise HTTPException(status_code=404, detail="Fichier vidéo local introuvable sur le disque.")
 
     file_size = os.path.getsize(decoded_path)
@@ -382,8 +391,8 @@ async def stream_local_video(file_path: str = Query(..., description="Chemin du 
 @router.get("/stream/thumbnail")
 async def get_video_thumbnail(file_path: str = Query(..., description="Chemin absolu du fichier vidéo local")):
     """Generates and caches a video thumbnail at 00:00:30 using ffmpeg."""
-    decoded_path = unquote(file_path).strip()
-    if not os.path.exists(decoded_path) or not os.path.isfile(decoded_path):
+    decoded_path = _media_path_or_404(file_path, "Fichier vidéo")
+    if not os.path.isfile(decoded_path):
         raise HTTPException(status_code=404, detail="Fichier vidéo introuvable")
 
     data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
@@ -395,24 +404,14 @@ async def get_video_thumbnail(file_path: str = Query(..., description="Chemin ab
     if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
         return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
 
-    try:
-        # Run ffmpeg to extract 1 frame at 30 seconds
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", "00:00:30",
-            "-i", decoded_path,
-            "-vframes", "1",
-            "-q:v", "3",
-            thumb_path
-        ]
+    def _extract_frame(seek: str) -> bool:
+        cmd = ["ffmpeg", "-y", "-ss", seek, "-i", decoded_path, "-vframes", "1", "-q:v", "3", thumb_path]
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-        if proc.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
-            return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
-        
-        # Fallback to seeking 5 seconds if 30s is past the end
-        cmd[2] = "00:00:05"
-        proc2 = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-        if proc2.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
+        return proc.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000
+
+    try:
+        # 1 frame at 30 seconds, or at 5 seconds if 30s is past the end (off the event loop)
+        if await asyncio.to_thread(_extract_frame, "00:00:30") or await asyncio.to_thread(_extract_frame, "00:00:05"):
             return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
     except Exception as e:
         print(f"[Thumbnail] Error generating thumbnail for {decoded_path}: {e}")
@@ -450,15 +449,18 @@ async def check_episodes_downloaded(
 @router.get("/library/downloaded")
 async def get_downloaded_library():
     root_folder = settings_service.get_root_folder()
-    lib = cache_service.scan_downloaded_library(root_folder)
+    lib = await asyncio.to_thread(cache_service.scan_downloaded_library, root_folder)
     return {"total_animes": len(lib), "library": lib}
 
 @router.delete("/library/episode")
 async def delete_downloaded_episode(file_path: str = Query(..., description="Chemin absolu du fichier épisode ou dossier de chapitre")):
     """Delete a single downloaded episode file or chapter scan folder from disk."""
-    decoded_path = unquote(file_path).strip()
-    if not os.path.exists(decoded_path):
-        raise HTTPException(status_code=404, detail="Fichier ou dossier introuvable sur le disque.")
+    decoded_path = _media_path_or_404(file_path, "Fichier ou dossier")
+    # Only an episode file or a chapter folder (category/anime/season/item): never the root,
+    # a category ("anime", "Anime") or a whole anime folder (that is /library/anime)
+    rel_parts = os.path.relpath(decoded_path, media_root(settings_service.get_root_folder())).split(os.sep)
+    if len(rel_parts) < 3 or ".." in rel_parts:
+        raise HTTPException(status_code=400, detail="Suppression de ce dossier refusée.")
     try:
         if os.path.isdir(decoded_path):
             shutil.rmtree(decoded_path)
@@ -482,10 +484,16 @@ async def delete_downloaded_anime(
     """Delete an entire anime folder from disk. Stats/history are preserved."""
     root_folder = settings_service.get_root_folder()
     safe_title = sanitize_filename(anime_title)
-    
+    if not safe_title.strip("."):
+        # ".." or "" would resolve to the whole library
+        raise HTTPException(status_code=400, detail="Titre invalide.")
+
     deleted = False
     for sub in ["anime", "Anime"]:
         anime_dir = os.path.join(root_folder, "nami", sub, safe_title)
+        category_dir = os.path.realpath(os.path.join(root_folder, "nami", sub))
+        if os.path.normcase(os.path.dirname(os.path.realpath(anime_dir))) != os.path.normcase(category_dir):
+            continue
         if os.path.exists(anime_dir) and os.path.isdir(anime_dir):
             try:
                 shutil.rmtree(anime_dir)
@@ -500,7 +508,7 @@ async def delete_downloaded_anime(
 # --- Watch History & Progress Routes ---
 @router.get("/history")
 async def get_history(x_user_id: Optional[str] = Header("default")):
-    return history_service.get_history(user_id=x_user_id or "default")
+    return history_service.get_history_for_client(user_id=x_user_id or "default")
 
 @router.get("/history/continue")
 async def get_continue_watching(x_user_id: Optional[str] = Header("default")):
@@ -618,10 +626,22 @@ from backend.services.update_service import update_service, ANIME_SAMA_PATH, VOI
 
 @router.get("/updates/check")
 async def check_updates():
-    return update_service.check_all_updates()
+    # git ls-remote + PyPI lookups: several seconds of blocking I/O
+    return await asyncio.to_thread(update_service.check_all_updates)
 
 @router.post("/updates/apply")
 async def apply_update(target: str = Query(..., description="'animesama', 'voiranime', 'yoitsuwrap', or 'all'")):
+    # git pull, pip install and process restarts must not freeze the server
+    return await asyncio.to_thread(_apply_update, target)
+
+_update_lock = threading.Lock()
+
+def _apply_update(target: str) -> dict:
+    # One update at a time: concurrent git pull / pip install / restarts would race
+    with _update_lock:
+        return _apply_update_locked(target)
+
+def _apply_update_locked(target: str) -> dict:
     from backend.main import restart_submodule
     results = {}
 

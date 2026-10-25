@@ -1,80 +1,110 @@
 import os
 import re
+import time
 import asyncio
+import threading
 from typing import Optional, List, Dict
 from YoitsuWrap.Config import Config
 from YoitsuWrap.Anime import Anime
 from YoitsuWrap.Scan import Scan
-from YoitsuWrap.Season import Season
-from YoitsuWrap.Chapter import Chapter
 from backend.services.settings_service import settings_service
+
+YOITSU_SOURCES = ["ANIMESAMA", "VOIRANIME"]
+CONFIG_RETRY_DELAY = 30.0
 
 class YoitsuService:
     def __init__(self):
-        self._config = None
+        self._config: Optional[Dict[str, Config]] = None
+        self._config_retry_at = 0.0
+        self._lock = threading.RLock()
         self._cache_scans: Dict[str, Scan] = {}
         self._cache_animes: Dict[str, Anime] = {}
 
-    def get_config(self) -> Config:
-        root_path = settings_service.get_root_folder()
-        downloads_path = os.path.join(root_path, "nami")
-        os.makedirs(downloads_path, exist_ok=True)
+    def reset_config(self):
+        """Forget the cached Config."""
+        with self._lock:
+            self._config = None
+            self._config_retry_at = 0.0
 
-        if not self._config:
-            self._config = Config.create_config(
-                urls=["http://127.0.0.1", "http://127.0.0.1"],
-                ports=[5000, 8000],
-                path=downloads_path,
-                sources=["ANIMESAMA", "VOIRANIME"]
-            )
-        return self._config
+    def allow_retry(self):
+        """Lift the retry delay (an API just came back) without dropping a valid cached Config."""
+        with self._lock:
+            self._config_retry_at = 0.0
+
+    def get_config(self) -> Optional[Dict[str, Config]]:
+        """Builds the YoitsuWrap Config once both APIs answer; returns None while they are unreachable.
+
+        Config.create_config pings every API and calls exit() when one is down: the resulting
+        SystemExit (not an Exception) is caught here so it can never stop the Nami server.
+        A partial config is returned but not cached, so a later call retries the missing API.
+        """
+        with self._lock:
+            if self._config:
+                return self._config
+            if time.monotonic() < self._config_retry_at:
+                return None
+
+            root_path = settings_service.get_root_folder()
+            downloads_path = os.path.join(root_path, "nami")
+            os.makedirs(downloads_path, exist_ok=True)
+
+            cfg = None
+            try:
+                cfg = Config.create_config(
+                    urls=["http://127.0.0.1", "http://127.0.0.1"],
+                    ports=[5000, 8000],
+                    path=downloads_path,
+                    sources=YOITSU_SOURCES
+                )
+            except (Exception, SystemExit) as e:
+                print(f"[YoitsuService] API indisponible pour YoitsuWrap: {e!r}")
+
+            if cfg and len(cfg) == len(YOITSU_SOURCES):
+                self._config = cfg
+                return cfg
+
+            self._config_retry_at = time.monotonic() + CONFIG_RETRY_DELAY
+            return cfg or None
 
     def get_anime(self, title: str, version: str = "vostfr") -> Optional[Anime]:
         """Fetches or returns cached unified Anime object from YoitsuWrap."""
         cache_key = f"{title.lower()}:{version.lower()}"
-        if cache_key in self._cache_animes:
-            return self._cache_animes[cache_key]
+        with self._lock:
+            if cache_key in self._cache_animes:
+                return self._cache_animes[cache_key]
 
         cfg = self.get_config()
+        if not cfg:
+            return None
         try:
             anime_obj = Anime.search_by_name(title=title, config=cfg, version=version)
             if isinstance(anime_obj, Anime):
-                self._cache_animes[cache_key] = anime_obj
-                # Cache scan if present
-                if anime_obj.get_scan():
-                    self._cache_scans[title.lower()] = anime_obj.get_scan()
+                with self._lock:
+                    self._cache_animes[cache_key] = anime_obj
+                    # Cache scan if present
+                    if anime_obj.get_scan():
+                        self._cache_scans[title.lower()] = anime_obj.get_scan()
                 return anime_obj
         except Exception as e:
             print(f"[YoitsuService] Error searching anime '{title}': {e}")
-        return None
-
-    def get_anime_cover(self, title: str) -> Optional[str]:
-        """Resolves cover url using YoitsuWrap APIs (/getInfoAnime) directly."""
-        cfg = self.get_config()
-        import requests
-        for conf in cfg.values():
-            try:
-                r = requests.get(f"{conf.API_LINK}/getInfoAnime", params={"q": title}, timeout=3.0)
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list) and len(data) > 0 and data[0].get("cover"):
-                        return data[0]["cover"]
-            except Exception:
-                pass
         return None
 
     def get_scan(self, manga_title: str) -> Optional[Scan]:
         """Fetches manga scan object with all chapters via YoitsuWrap."""
         clean_title = manga_title.strip()
         key = clean_title.lower()
-        if key in self._cache_scans:
-            return self._cache_scans[key]
+        with self._lock:
+            if key in self._cache_scans:
+                return self._cache_scans[key]
 
         cfg = self.get_config()
+        if not cfg:
+            return None
         try:
             scan_obj = Scan.search_by_name(manga_name=clean_title, config=cfg)
             if isinstance(scan_obj, Scan):
-                self._cache_scans[key] = scan_obj
+                with self._lock:
+                    self._cache_scans[key] = scan_obj
                 return scan_obj
         except Exception as e:
             print(f"[YoitsuService] Error fetching scan '{manga_title}': {e}")
@@ -148,7 +178,7 @@ class YoitsuService:
         """Downloads chapter images via YoitsuWrap Chapter.download_chapter, tracked in DownloadService."""
         from backend.services.download_service import download_service
 
-        scan = self.get_scan(manga_title)
+        scan = await asyncio.to_thread(self.get_scan, manga_title)
         if not scan:
             raise Exception("Scan introuvable pour ce manga.")
 
@@ -171,7 +201,7 @@ class YoitsuService:
         download_service._save_tasks()
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, chapter_obj.download_chapter, images_workers)
 
             task.status = "completed"
@@ -194,7 +224,7 @@ class YoitsuService:
         """Downloads all chapters via YoitsuWrap Scan.download_scan, tracked in DownloadService."""
         from backend.services.download_service import download_service
 
-        scan = self.get_scan(manga_title)
+        scan = await asyncio.to_thread(self.get_scan, manga_title)
         if not scan:
             raise Exception("Scan introuvable pour ce manga.")
 
@@ -210,7 +240,7 @@ class YoitsuService:
         download_service._save_tasks()
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, scan.download_scan, None, 4, max_workers)
 
             task.status = "completed"

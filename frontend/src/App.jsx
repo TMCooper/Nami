@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
 import HistoryView from './components/HistoryView';
@@ -9,6 +9,15 @@ import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
 import StatsModal from './components/StatsModal';
 import AuthModal from './components/AuthModal';
+
+// Same idea as the backend title keys: accents, case, punctuation and VF/VOSTFR tags ignored
+const normalizeTitle = (title) => (title || '')
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase()
+  .replace(/\((?:vf|vostfr)\)/g, ' ')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim()
+  .replace(/\s+(?:vf|vostfr)$/, '');
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -43,7 +52,8 @@ export default function App() {
   // Downloads state
   const [downloads, setDownloads] = useState([]);
 
-  const userId = currentUser?.id || 'guest';
+  // Same fallback id as the modals and the backend, so shelves read the bucket the player writes to
+  const userId = currentUser?.id || 'default';
 
   // Save active user to localStorage when changed
   const handleSelectUser = (user) => {
@@ -157,6 +167,58 @@ export default function App() {
     });
   };
 
+  // History entries only store a title: find the matching catalogue entry (recents first, then search).
+  // strict: only an exact (normalized) title match, never "the best search hit".
+  const findAnimeByTitle = async (title, { strict = false } = {}) => {
+    const wanted = normalizeTitle(title);
+    const sameTitle = (a) => a.title && normalizeTitle(a.title) === wanted;
+    const recentMatch = recentAnimes.find(sameTitle);
+    if (recentMatch && recentMatch.url && recentMatch.source) return recentMatch;
+
+    const searchRes = await fetch(`/api/search?q=${encodeURIComponent(title)}`);
+    if (!searchRes.ok) return null;
+    const searchData = await searchRes.json();
+    const match = (searchData.results || []).find(sameTitle) || (strict ? null : searchData.results?.[0]);
+    return match && match.url && match.source ? match : null;
+  };
+
+  // Ignores lookups that finish after the user already opened (or closed) another anime
+  const selectRequestRef = useRef(0);
+
+  const handleSelectAnime = async (anime) => {
+    const request = ++selectRequestRef.current;
+    if (anime?.url && anime?.source) {
+      setSelectedAnime(anime);
+      return;
+    }
+    try {
+      const match = await findAnimeByTitle(anime?.title, { strict: true });
+      if (request !== selectRequestRef.current) return;
+      if (match) {
+        setSelectedAnime({ ...match, cover: match.cover || anime.cover });
+      } else if (anime?.title) {
+        // No confident match: let the user pick the entry from a catalogue search
+        setSearchQuery(anime.title);
+        setActiveTab('catalog');
+        loadCatalog(anime.title, activeSource);
+      }
+    } catch (e) {
+      console.warn("Could not open anime details:", e);
+    }
+  };
+
+  const handleCloseAnime = () => {
+    selectRequestRef.current += 1;
+    setSelectedAnime(null);
+    loadUserShelves();
+  };
+
+  const handleApisReady = () => {
+    loadCatalog(searchQuery, activeSource);
+    loadRandomSuggestions();
+    loadUserShelves();
+  };
+
   const handleResumeFromShelf = async (item) => {
     const initialEp = {
       num: item.episode_num,
@@ -178,24 +240,13 @@ export default function App() {
     // Background hydrate full season episodes so auto-advance and episode drawer work seamlessly
     try {
       let animeDetails = null;
-      const recentMatch = recentAnimes.find(
-        (a) => a.title && a.title.toLowerCase() === item.anime_title.toLowerCase()
-      );
-      if (recentMatch && recentMatch.url && recentMatch.source) {
-        const res = await fetch(`/api/details?url=${encodeURIComponent(recentMatch.url)}&source=${encodeURIComponent(recentMatch.source)}`);
+      const match = await findAnimeByTitle(item.anime_title);
+      if (match) {
+        const res = await fetch(
+          `/api/details?url=${encodeURIComponent(match.url)}&source=${encodeURIComponent(match.source)}`,
+          { headers: { 'X-User-ID': userId } }
+        );
         if (res.ok) animeDetails = await res.json();
-      } else {
-        const searchRes = await fetch(`/api/search?q=${encodeURIComponent(item.anime_title)}`);
-        if (searchRes.ok) {
-          const searchData = await searchRes.json();
-          const match = (searchData.results || []).find(
-            (a) => a.title && a.title.toLowerCase() === item.anime_title.toLowerCase()
-          ) || searchData.results?.[0];
-          if (match && match.url && match.source) {
-            const res = await fetch(`/api/details?url=${encodeURIComponent(match.url)}&source=${encodeURIComponent(match.source)}`);
-            if (res.ok) animeDetails = await res.json();
-          }
-        }
       }
 
       if (animeDetails) {
@@ -291,6 +342,7 @@ export default function App() {
         onOpenStats={() => setIsStatsOpen(true)}
         currentUser={currentUser}
         onOpenAuth={() => setIsAuthOpen(true)}
+        onApisReady={handleApisReady}
       />
 
       <main style={{ flex: 1, padding: '0 24px', maxWidth: '1440px', width: '100%', margin: '0 auto' }}>
@@ -304,14 +356,16 @@ export default function App() {
             recentAnimes={recentAnimes}
             randomSuggestions={randomSuggestions}
             onRollRandom={loadRandomSuggestions}
-            onSelectAnime={(anime) => setSelectedAnime(anime)}
+            onSelectAnime={handleSelectAnime}
             onResumeEpisode={handleResumeFromShelf}
           />
         ) : activeTab === 'history' ? (
           <HistoryView
             currentUser={currentUser}
-            onSelectAnime={(anime) => setSelectedAnime(anime)}
-            onPlayEpisode={(anime, season, ep, eps) => handlePlayEpisode(anime.title, season, ep, eps, anime.cover, 0)}
+            onSelectAnime={handleSelectAnime}
+            onPlayEpisode={(title, season, ep, eps, cover, time, filePath) =>
+              handlePlayEpisode(title, season, ep, eps, cover, time, filePath)
+            }
           />
         ) : (
           <OfflineLibraryView
@@ -326,10 +380,7 @@ export default function App() {
         <AnimeDetailModal
           currentUser={currentUser}
           anime={selectedAnime}
-          onClose={() => {
-            setSelectedAnime(null);
-            loadUserShelves();
-          }}
+          onClose={handleCloseAnime}
           onPlayEpisode={(animeTitle, season, ep, eps, cover, time, filePath) => {
             handlePlayEpisode(animeTitle, season, ep, eps, cover, time, filePath);
             loadUserShelves();

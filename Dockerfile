@@ -43,7 +43,7 @@ RUN pip install --no-cache-dir --upgrade "typing-extensions>=4.14.0" "anyio>=4.8
 COPY backend /app/backend
 
 # Create persistent storage mountpoints
-RUN mkdir -p /app/data /downloads
+RUN mkdir -p /app/data /downloads /app/AnimeSamaApi/src/data /app/voiranime_API/data
 
 # Copy compiled frontend from builder
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist

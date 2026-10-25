@@ -1,9 +1,9 @@
 import os
-import json
 import hashlib
 import secrets
 import time
 from typing import Optional, List, Dict
+from backend.services.storage import load_json, save_json
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -27,22 +27,16 @@ class UserService:
         self.users: Dict[str, dict] = self._load()
 
     def _load(self) -> dict:
-        if os.path.exists(USERS_FILE):
-            try:
-                with open(USERS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        # Ensure default is never kept
-                        data.pop("default", None)
-                        return data
-            except Exception as e:
-                print(f"[UserService] Error loading users DB: {e}")
+        data = load_json(USERS_FILE, dict)
+        if isinstance(data, dict):
+            # Ensure default is never kept
+            data.pop("default", None)
+            return data
         return {}
 
     def _save(self):
         try:
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.users, f, indent=2, ensure_ascii=False)
+            save_json(USERS_FILE, self.users)
         except Exception as e:
             print(f"[UserService] Error saving users DB: {e}")
 

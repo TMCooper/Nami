@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import time
 import uuid
 import re
 import asyncio
@@ -8,6 +8,8 @@ import subprocess
 import aiohttp
 from typing import Dict, List, Optional
 from backend.services.settings_service import settings_service
+from backend.services.storage import load_json, save_json
+from backend.services.http_headers import USER_AGENT, stream_referer
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 DOWNLOADS_DB = os.path.join(DATA_DIR, "downloads.json")
@@ -82,13 +84,14 @@ class DownloadService:
         self.active_downloads = 0
         self.max_concurrent = 3
         self.worker_task = None
+        self._last_save = 0.0
         self._load_tasks()
 
     def _load_tasks(self):
         if os.path.exists(DOWNLOADS_DB):
             try:
-                with open(DOWNLOADS_DB, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = load_json(DOWNLOADS_DB, list)
+                if isinstance(data, list):
                     for item in data:
                         t = DownloadTask(
                             anime_title=item["anime_title"],
@@ -105,10 +108,14 @@ class DownloadService:
             except Exception as e:
                 print(f"[DownloadService] Error loading tasks DB: {e}")
 
-    def _save_tasks(self):
+    def _save_tasks(self, force: bool = True):
+        # Progress updates (force=False) are written at most once per second
+        now = time.monotonic()
+        if not force and now - self._last_save < 1.0:
+            return
+        self._last_save = now
         try:
-            with open(DOWNLOADS_DB, "w", encoding="utf-8") as f:
-                json.dump([t.to_dict() for t in self.tasks.values()], f, indent=2, ensure_ascii=False)
+            save_json(DOWNLOADS_DB, [t.to_dict() for t in self.tasks.values()])
         except Exception as e:
             print(f"[DownloadService] Error saving tasks DB: {e}")
 
@@ -166,8 +173,8 @@ class DownloadService:
                     from backend.services.cache_service import cache_service
                     cov_url = cache_service._find_anime_cover(norm_anime, anime_dir)
                     if not cov_url:
-                        from backend.services.catalog_service import catalog_service
-                        cov_url = catalog_service._get_voiranime_cached_cover(task.anime_title) or catalog_service._get_voiranime_cached_cover(norm_anime)
+                        from backend.services.cover_registry import cover_registry
+                        cov_url = cover_registry.lookup(task.anime_title) or cover_registry.lookup(norm_anime)
                     if cov_url:
                         cache_service._save_local_cover_async(cov_url, anime_dir)
                 except Exception as cov_err:
@@ -220,9 +227,14 @@ class DownloadService:
 
     async def _download_hls_ffmpeg(self, task: DownloadTask, output_file: str):
         # 1. Try ffmpeg command line to download m3u8 stream
+        header_lines = f"User-Agent: {USER_AGENT}\r\n"
+        referer = stream_referer(task.stream_url)
+        if referer:
+            header_lines += f"Referer: {referer}\r\n"
         cmd = [
             "ffmpeg", "-y",
-            "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+            "-loglevel", "error", "-nostats",
+            "-headers", header_lines,
             "-i", task.stream_url,
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
@@ -231,10 +243,11 @@ class DownloadService:
         
         proc = None
         try:
+            # Output is discarded: an unread PIPE fills up and stalls ffmpeg on long downloads
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
             )
 
             while proc.returncode is None:
@@ -247,7 +260,7 @@ class DownloadService:
                 await asyncio.sleep(1)
                 if task.progress < 95.0:
                     task.progress += 2.5
-                self._save_tasks()
+                self._save_tasks(force=False)
 
             await proc.wait()
             if proc.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
@@ -260,23 +273,29 @@ class DownloadService:
         yt_cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-check-certificates",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "--no-progress",
+            "--user-agent", USER_AGENT,
             "-o", output_file,
-            task.stream_url
         ]
+        if referer:
+            yt_cmd += ["--referer", referer]
+        yt_cmd.append(task.stream_url)
         yt_proc = await asyncio.create_subprocess_exec(
             *yt_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE
         )
-        await yt_proc.wait()
+        _, stderr_b = await yt_proc.communicate()
         if yt_proc.returncode != 0:
-            stderr_b = await yt_proc.stderr.read()
             raise Exception(f"Download failed: {stderr_b.decode('utf-8', errors='ignore')[-200:]}")
 
     async def _download_http_file(self, task: DownloadTask, output_file: str):
+        headers = {"User-Agent": USER_AGENT}
+        referer = stream_referer(task.stream_url)
+        if referer:
+            headers["Referer"] = referer
         async with aiohttp.ClientSession() as session:
-            async with session.get(task.stream_url) as resp:
+            async with session.get(task.stream_url, headers=headers) as resp:
                 if resp.status != 200:
                     raise Exception(f"HTTP Error {resp.status}")
 
@@ -297,6 +316,6 @@ class DownloadService:
                         elapsed = max(0.1, asyncio.get_event_loop().time() - start_time)
                         speed_mb = (downloaded / (1024 * 1024)) / elapsed
                         task.speed = f"{round(speed_mb, 2)} MB/s"
-                        self._save_tasks()
+                        self._save_tasks(force=False)
 
 download_service = DownloadService()

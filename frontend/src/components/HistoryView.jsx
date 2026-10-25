@@ -15,6 +15,7 @@ import {
   HardDrive,
   Wifi
 } from 'lucide-react';
+import { DEFAULT_EPISODE_THUMB, imageFallback } from '../utils/placeholders';
 
 export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode }) {
   const [historyData, setHistoryData] = useState({});
@@ -309,7 +310,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
             const hasLocal = Boolean(video.file_path);
             const thumbUrl = hasLocal
               ? `/api/stream/thumbnail?file_path=${encodeURIComponent(video.file_path)}`
-              : (video.animeCover || 'https://via.placeholder.com/320x180/0d1117/8b949e?text=Episode');
+              : (video.animeCover || DEFAULT_EPISODE_THUMB);
 
             return (
               <div
@@ -366,13 +367,9 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                   <img
                     src={thumbUrl}
                     alt={video.animeTitle}
-                    onError={(e) => {
-                      if (video.animeCover && e.target.src !== video.animeCover) {
-                        e.target.src = video.animeCover;
-                      } else {
-                        e.target.src = 'https://via.placeholder.com/320x180/0d1117/8b949e?text=Episode';
-                      }
-                    }}
+                    loading="lazy"
+                    decoding="async"
+                    onError={imageFallback(hasLocal ? [video.animeCover] : [], DEFAULT_EPISODE_THUMB)}
                     style={{
                       width: '100%',
                       height: '100%',
@@ -498,7 +495,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
                         <span
                           style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', cursor: 'pointer', fontWeight: 600 }}
-                          onClick={() => onSelectAnime({ title: video.animeTitle, source: 'anime_sama', url: '' })}
+                          onClick={() => onSelectAnime({ title: video.animeTitle, cover: video.animeCover })}
                           title="Ouvrir la fiche de la série"
                         >
                           {video.animeTitle}
@@ -589,7 +586,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                     <button
                       className="btn btn-secondary"
                       style={{ padding: '6px 10px', fontSize: '0.78rem' }}
-                      onClick={() => onSelectAnime({ title: video.animeTitle, source: 'anime_sama', url: '' })}
+                      onClick={() => onSelectAnime({ title: video.animeTitle, cover: video.animeCover })}
                       title="Voir la fiche complète de l'anime"
                     >
                       <ExternalLink size={13} />

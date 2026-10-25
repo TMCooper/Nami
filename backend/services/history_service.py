@@ -1,7 +1,8 @@
 import os
-import json
 import time
 from typing import Optional, List, Dict
+from backend.services.storage import load_json, save_json
+from backend.services.cover_utils import raw_cover_url, is_usable_cover, client_cover_url
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
@@ -12,30 +13,32 @@ class HistoryService:
         self.history = self._load()
 
     def _load(self) -> dict:
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Backward compatibility migration:
-                    if data and not any(isinstance(v, dict) and "episodes" not in v for k, v in data.items()):
-                        first_val = next(iter(data.values()), {})
-                        if "episodes" in first_val or "last_season" in first_val:
-                            return {"default": data}
-                    return data
-            except Exception as e:
-                print(f"[HistoryService] Error loading history DB: {e}")
-        return {}
+        data = load_json(HISTORY_FILE, dict)
+        if not isinstance(data, dict):
+            return {}
+        # Backward compatibility migration:
+        if data and not any(isinstance(v, dict) and "episodes" not in v for k, v in data.items()):
+            first_val = next(iter(data.values()), {})
+            if "episodes" in first_val or "last_season" in first_val:
+                return {"default": data}
+        return data
 
     def _save(self):
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.history, f, indent=2, ensure_ascii=False)
+            save_json(HISTORY_FILE, self.history)
         except Exception as e:
             print(f"[HistoryService] Error saving history DB: {e}")
 
     def get_history(self, user_id: str = "default") -> dict:
         uid = user_id or "default"
         return self.history.get(uid, {})
+
+    def get_history_for_client(self, user_id: str = "default") -> dict:
+        """Same as get_history, with covers rewritten to browser-loadable URLs."""
+        return {
+            title: {**record, "cover": client_cover_url(record.get("cover", ""))}
+            for title, record in self.get_history(user_id).items()
+        }
 
     def get_anime_history(self, user_id: str, anime_title: str) -> dict:
         user_hist = self.get_history(user_id)
@@ -62,10 +65,13 @@ class HistoryService:
 
         user_hist = self.history[uid]
 
+        # Placeholders (data: URIs, via.placeholder) must never be stored as a cover
+        cover = raw_cover_url(cover) if is_usable_cover(cover) else ""
+
         if anime_title not in user_hist:
             user_hist[anime_title] = {
                 "anime_title": anime_title,
-                "cover": cover or "",
+                "cover": cover,
                 "last_season": season,
                 "last_ep_id": ep_id,
                 "last_updated": time.time(),
@@ -73,7 +79,7 @@ class HistoryService:
             }
 
         anime_record = user_hist[anime_title]
-        if cover and not anime_record.get("cover"):
+        if cover and not is_usable_cover(anime_record.get("cover", "")):
             anime_record["cover"] = cover
         anime_record["last_season"] = season
         anime_record["last_ep_id"] = ep_id
@@ -182,7 +188,7 @@ class HistoryService:
             # If unfinished (> 10s and not watched), or recently watched
             continue_list.append({
                 "anime_title": anime_title,
-                "cover": record.get("cover", ""),
+                "cover": client_cover_url(record.get("cover", "")),
                 "season": last_season,
                 "episode_num": last_ep_id,
                 "position_sec": pos,

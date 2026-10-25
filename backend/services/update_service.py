@@ -7,7 +7,16 @@ from typing import Dict, Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ANIME_SAMA_PATH = os.path.join(PROJECT_ROOT, "AnimeSamaApi")
+if not os.path.exists(ANIME_SAMA_PATH):
+    sibling_as = os.path.join(os.path.dirname(PROJECT_ROOT), "AnimeSamaApi")
+    if os.path.exists(sibling_as):
+        ANIME_SAMA_PATH = sibling_as
+
 VOIRANIME_PATH = os.path.join(PROJECT_ROOT, "voiranime_API")
+if not os.path.exists(VOIRANIME_PATH):
+    sibling_va = os.path.join(os.path.dirname(PROJECT_ROOT), "voiranime_API")
+    if os.path.exists(sibling_va):
+        VOIRANIME_PATH = sibling_va
 
 class UpdateService:
     def __init__(self):
@@ -142,6 +151,9 @@ class UpdateService:
             req_path = os.path.join(target_path, "requirements.txt")
             if os.path.exists(req_path):
                 subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path], check=False)
+                # Safeguard FastAPI typing_extensions consistency
+                subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "--upgrade", "typing-extensions>=4.14.0", "anyio>=4.8.0"], check=False)
+
 
             new_commit = self._get_local_commit(target_path)
             return {

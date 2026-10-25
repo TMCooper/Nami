@@ -126,8 +126,16 @@ export default function Header({
             style={{ fontSize: '0.78rem', padding: '5px 10px', gap: '6px' }}
             title="Changer de profil ou se connecter"
           >
-            <span style={{ fontSize: '1rem' }}>{currentUser?.avatar || '👤'}</span>
-            <span style={{ fontWeight: 700, color: '#fff' }}>{currentUser?.username || 'Utilisateur'}</span>
+            {currentUser?.avatar && currentUser.avatar.startsWith('data:') ? (
+              <img
+                src={currentUser.avatar}
+                alt="Avatar"
+                style={{ width: '22px', height: '22px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border-color)' }}
+              />
+            ) : (
+              <span style={{ fontSize: '1rem' }}>{currentUser?.avatar || '👤'}</span>
+            )}
+            <span style={{ fontWeight: 700, color: '#fff' }}>{currentUser?.username || 'Connexion'}</span>
           </button>
 
           {/* Stats Button */}

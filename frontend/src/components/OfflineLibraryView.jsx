@@ -1,9 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { HardDrive, Play, Folder, Film, Loader2, Sparkles, RefreshCw } from 'lucide-react';
+import {
+  HardDrive,
+  Play,
+  Folder,
+  Loader2,
+  RefreshCw,
+  Trash2,
+  AlertTriangle,
+  CheckSquare,
+  Square,
+  Film,
+  ArrowLeft,
+  Tv
+} from 'lucide-react';
 
 export default function OfflineLibraryView({ onPlayEpisode }) {
   const [library, setLibrary] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedAnimeTitle, setSelectedAnimeTitle] = useState(null);
+  const [activeSeasonIdx, setActiveSeasonIdx] = useState(0);
+  const [selectedEpisodes, setSelectedEpisodes] = useState({});
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { type: 'anime'|'episodes', animeTitle, singlePath? }
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchLibrary = () => {
     setIsLoading(true);
@@ -18,11 +36,66 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
     fetchLibrary();
   }, []);
 
+  const currentAnime = library.find(a => a.anime_title === selectedAnimeTitle) || null;
+  const currentSeason = currentAnime?.seasons?.[activeSeasonIdx] || currentAnime?.seasons?.[0] || null;
+
+  const toggleEpisodeSelect = (key) => {
+    setSelectedEpisodes(prev => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
+
+  const selectAllInSeason = (seasonEpisodes) => {
+    const allSelected = seasonEpisodes.every(ep => selectedEpisodes[ep.file_path]);
+    const updates = {};
+    seasonEpisodes.forEach(ep => {
+      updates[ep.file_path] = !allSelected;
+    });
+    setSelectedEpisodes(prev => ({ ...prev, ...updates }));
+  };
+
+  const handleDeleteAnime = async (animeTitle) => {
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`/api/library/anime?anime_title=${encodeURIComponent(animeTitle)}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchLibrary();
+        setDeleteConfirm(null);
+        setSelectedAnimeTitle(null);
+      }
+    } catch (err) {
+      console.error("Delete anime error:", err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteSelectedEpisodes = async () => {
+    const paths = Object.entries(selectedEpisodes).filter(([, v]) => v).map(([k]) => k);
+    if (paths.length === 0) return;
+    setIsDeleting(true);
+    try {
+      for (const p of paths) {
+        await fetch(`/api/library/episode?file_path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+      }
+      setSelectedEpisodes({});
+      setDeleteConfirm(null);
+      fetchLibrary();
+    } catch (err) {
+      console.error("Delete episodes error:", err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const selectedCount = Object.values(selectedEpisodes).filter(Boolean).length;
+
   if (isLoading) {
     return (
-      <div style={{ padding: '60px', textAlign: 'center', color: 'var(--text-muted)' }}>
-        <Loader2 className="animate-spin" size={28} color="var(--primary)" style={{ margin: '0 auto 10px auto' }} />
-        <span>Scan des fichiers téléchargés sur le disque...</span>
+      <div style={{ padding: '80px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <Loader2 className="animate-spin" size={32} color="var(--primary)" style={{ margin: '0 auto 12px auto' }} />
+        <span style={{ fontSize: '0.95rem' }}>Scan des fichiers vidéo sur le disque...</span>
       </div>
     );
   }
@@ -41,8 +114,8 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
         padding: '24px'
       }}>
         <div style={{
-          width: '64px',
-          height: '64px',
+          width: '68px',
+          height: '68px',
           borderRadius: '50%',
           background: 'rgba(56, 139, 253, 0.1)',
           display: 'flex',
@@ -50,112 +123,635 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
           justifyContent: 'center',
           border: '1px solid rgba(56, 139, 253, 0.2)'
         }}>
-          <HardDrive size={30} color="#58A6FF" />
+          <HardDrive size={32} color="#58A6FF" />
         </div>
         <h3 style={{ fontSize: '1.25rem', color: '#fff', fontWeight: 700 }}>Aucun anime téléchargé sur le disque</h3>
         <p style={{ maxWidth: '460px', fontSize: '0.88rem', lineHeight: '1.5' }}>
-          Les épisodes que vous téléchargez sont automatiquement stockés sur votre disque hôte (dossier <code style={{ color: '#58A6FF' }}>/downloads</code>). Vous pourrez les lire ici même sans connexion Internet !
+          Les épisodes téléchargés sont stockés localement sur votre machine hôte (dossier <code style={{ color: '#58A6FF' }}>/downloads</code>). Vous pouvez les regarder hors-ligne à tout moment !
         </p>
       </div>
     );
   }
 
+  // --- VIEW 2: DEDICATED YOUTUBE-STYLE SHOWCASE VIEW FOR SELECTED ANIME ---
+  if (currentAnime) {
+    const totalSize = currentAnime.seasons.reduce((acc, s) => acc + s.episodes.reduce((a, e) => a + e.size_mb, 0), 0);
+    const allSeasonEpisodes = currentSeason?.episodes || [];
+    const formattedEpisodesForPlayer = allSeasonEpisodes.map(e => ({
+      num: e.num,
+      title: `Épisode ${e.num}`,
+      file_path: e.file_path,
+      url: e.file_path,
+      embed_url: e.file_path
+    }));
+
+    return (
+      <div style={{ padding: '20px 0', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        {/* Back navigation button */}
+        <div>
+          <button
+            className="btn btn-secondary"
+            onClick={() => { setSelectedAnimeTitle(null); setSelectedEpisodes({}); }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '0.86rem', padding: '7px 14px' }}
+          >
+            <ArrowLeft size={16} /> Retour à la Médiathèque
+          </button>
+        </div>
+
+        {/* Hero Showcase Card */}
+        <div
+          className="surface-card animate-fade-in"
+          style={{
+            borderRadius: 'var(--radius-md)',
+            padding: '24px',
+            display: 'flex',
+            gap: '24px',
+            alignItems: 'center',
+            background: 'linear-gradient(135deg, rgba(22, 27, 34, 0.95), rgba(13, 17, 23, 0.98))',
+            border: '1px solid var(--border-color)',
+            flexWrap: 'wrap'
+          }}
+        >
+          {/* Cover Poster */}
+          <div style={{
+            width: '130px',
+            height: '185px',
+            borderRadius: 'var(--radius-sm)',
+            overflow: 'hidden',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+            flexShrink: 0,
+            background: '#0D1117'
+          }}>
+            {currentAnime.cover ? (
+              <img
+                src={currentAnime.cover}
+                alt={currentAnime.anime_title}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none';
+                  if (e.currentTarget.nextSibling) e.currentTarget.nextSibling.style.display = 'flex';
+                }}
+              />
+            ) : null}
+            <div
+              style={{
+                width: '100%',
+                height: '100%',
+                display: currentAnime.cover ? 'none' : 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: `linear-gradient(135deg, hsl(${(currentAnime.anime_title.charCodeAt(0) * 37) % 360}, 60%, 25%), hsl(${(currentAnime.anime_title.charCodeAt(0) * 37 + 60) % 360}, 50%, 15%))`
+              }}
+            >
+              <Film size={36} color="rgba(255,255,255,0.4)" />
+            </div>
+          </div>
+
+          {/* Details & Actions */}
+          <div style={{ flex: 1, minWidth: '240px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <span className="badge" style={{ background: 'rgba(63, 185, 80, 0.2)', color: '#3FB950', border: '1px solid rgba(63, 185, 80, 0.3)' }}>
+                💾 Stocké en local
+              </span>
+              <span className="badge" style={{ background: 'rgba(56, 139, 253, 0.15)', color: '#58A6FF' }}>
+                {currentAnime.total_episodes} épisode(s)
+              </span>
+              <span className="badge" style={{ background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-muted)' }}>
+                {Math.round(totalSize)} Mo
+              </span>
+            </div>
+
+            <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#fff', margin: 0, lineHeight: 1.2 }}>
+              {currentAnime.anime_title}
+            </h1>
+
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+              Contenu hors-ligne prêt à la lecture instantanée sans dépendance réseau.
+            </p>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '6px', flexWrap: 'wrap' }}>
+              {allSeasonEpisodes.length > 0 && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => onPlayEpisode(
+                    currentAnime.anime_title,
+                    currentSeason?.season_name || "Saison 1",
+                    formattedEpisodesForPlayer[0],
+                    formattedEpisodesForPlayer,
+                    currentAnime.cover || '',
+                    0,
+                    formattedEpisodesForPlayer[0].file_path
+                  )}
+                  style={{ padding: '8px 18px', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}
+                >
+                  <Play size={16} fill="#fff" /> Tout regarder (Ép. 1)
+                </button>
+              )}
+
+              <button
+                className="btn btn-secondary"
+                onClick={() => setDeleteConfirm({ type: 'anime', animeTitle: currentAnime.anime_title })}
+                style={{ padding: '8px 16px', fontSize: '0.85rem', color: '#f85149', borderColor: 'rgba(248, 81, 73, 0.3)' }}
+              >
+                <Trash2 size={15} /> Supprimer l'anime
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Season Selector Tabs */}
+        {currentAnime.seasons.length > 1 && (
+          <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
+            {currentAnime.seasons.map((s, sIdx) => (
+              <button
+                key={sIdx}
+                className={`btn ${activeSeasonIdx === sIdx ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => { setActiveSeasonIdx(sIdx); setSelectedEpisodes({}); }}
+                style={{ fontSize: '0.84rem', padding: '6px 14px' }}
+              >
+                <Folder size={14} /> {s.season_name} ({s.episodes.length})
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Episodes Section Header & Multi-select Toolbar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Tv size={18} color="var(--accent-cyan)" />
+            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#fff', margin: 0 }}>
+              {currentSeason?.season_name || "Épisodes"}
+            </h3>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              ({allSeasonEpisodes.length} vidéo{allSeasonEpisodes.length > 1 ? 's' : ''})
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {selectedCount > 0 && (
+              <button
+                className="btn btn-primary"
+                style={{ fontSize: '0.8rem', padding: '5px 12px', background: '#f85149', borderColor: '#f85149' }}
+                onClick={() => setDeleteConfirm({ type: 'episodes' })}
+              >
+                <Trash2 size={13} /> Supprimer ({selectedCount})
+              </button>
+            )}
+
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '5px 12px' }}
+              onClick={() => selectAllInSeason(allSeasonEpisodes)}
+            >
+              {allSeasonEpisodes.length > 0 && allSeasonEpisodes.every(ep => selectedEpisodes[ep.file_path]) ? (
+                <><CheckSquare size={13} /> Tout désélectionner</>
+              ) : (
+                <><Square size={13} /> Tout sélectionner</>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* YouTube-Style 16:9 Episode Video Card Grid */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: '16px'
+        }}>
+          {allSeasonEpisodes.map((ep, epIdx) => {
+            const isSelected = !!selectedEpisodes[ep.file_path];
+            const epDataForPlayer = {
+              num: ep.num,
+              title: `Épisode ${ep.num}`,
+              file_path: ep.file_path,
+              url: ep.file_path,
+              embed_url: ep.file_path
+            };
+
+            return (
+              <div
+                key={epIdx}
+                className="surface-card animate-fade-in"
+                style={{
+                  borderRadius: 'var(--radius-sm)',
+                  overflow: 'hidden',
+                  background: isSelected ? 'rgba(248, 81, 73, 0.08)' : '#0D1117',
+                  border: isSelected ? '1px solid rgba(248, 81, 73, 0.5)' : '1px solid var(--border-color)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  transition: 'transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease',
+                  position: 'relative'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-3px)';
+                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(0,0,0,0.5)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                {/* 16:9 Thumbnail Box */}
+                <div
+                  style={{
+                    position: 'relative',
+                    width: '100%',
+                    aspectRatio: '16 / 9',
+                    background: '#161B22',
+                    overflow: 'hidden',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => onPlayEpisode(
+                    currentAnime.anime_title,
+                    currentSeason?.season_name || "Saison 1",
+                    epDataForPlayer,
+                    formattedEpisodesForPlayer,
+                    currentAnime.cover || '',
+                    0,
+                    ep.file_path
+                  )}
+                >
+                  {/* Thumbnail Image */}
+                  <img
+                    src={ep.thumbnail || `/api/stream/thumbnail?file_path=${encodeURIComponent(ep.file_path)}`}
+                    alt={`Épisode ${ep.num}`}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      display: 'block',
+                      transition: 'transform 0.3s ease'
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.04)'}
+                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                      if (e.currentTarget.nextSibling) e.currentTarget.nextSibling.style.display = 'flex';
+                    }}
+                  />
+
+                  {/* Fallback slate if thumbnail is unavailable */}
+                  <div style={{
+                    width: '100%',
+                    height: '100%',
+                    display: 'none',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'linear-gradient(135deg, #161B22, #0D1117)'
+                  }}>
+                    <Film size={28} color="rgba(255,255,255,0.2)" />
+                  </div>
+
+                  {/* YouTube-Style Play Button Overlay on Hover */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      background: 'rgba(0,0,0,0.3)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      opacity: 0,
+                      transition: 'opacity 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                    onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
+                  >
+                    <div style={{
+                      width: '48px',
+                      height: '48px',
+                      borderRadius: '50%',
+                      background: '#ff0000',
+                      boxShadow: '0 0 16px rgba(255,0,0,0.6)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#fff',
+                      transform: 'scale(0.95)',
+                      transition: 'transform 0.15s ease'
+                    }}>
+                      <Play size={20} fill="#fff" style={{ marginLeft: '3px' }} />
+                    </div>
+                  </div>
+
+                  {/* Duration / File Size Badge (YouTube style bottom right) */}
+                  <div style={{
+                    position: 'absolute',
+                    bottom: '6px',
+                    right: '6px',
+                    background: 'rgba(0, 0, 0, 0.85)',
+                    color: '#fff',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    fontSize: '0.72rem',
+                    fontWeight: 700,
+                    letterSpacing: '0.2px',
+                    pointerEvents: 'none'
+                  }}>
+                    {ep.size_mb} Mo
+                  </div>
+
+                  {/* Selection Checkbox (top-left of thumbnail) */}
+                  <div
+                    onClick={(e) => { e.stopPropagation(); toggleEpisodeSelect(ep.file_path); }}
+                    style={{
+                      position: 'absolute',
+                      top: '6px',
+                      left: '6px',
+                      background: isSelected ? 'rgba(248, 81, 73, 0.9)' : 'rgba(0,0,0,0.6)',
+                      borderRadius: '4px',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer'
+                    }}
+                    title="Sélectionner"
+                  >
+                    {isSelected ? <CheckSquare size={14} color="#fff" /> : <Square size={14} color="#fff" />}
+                  </div>
+                </div>
+
+                {/* Card Info below Thumbnail */}
+                <div style={{ padding: '10px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                  <div
+                    style={{ cursor: 'pointer', flex: 1, minWidth: 0 }}
+                    onClick={() => onPlayEpisode(
+                      currentAnime.anime_title,
+                      currentSeason?.season_name || "Saison 1",
+                      epDataForPlayer,
+                      formattedEpisodesForPlayer,
+                      currentAnime.cover || '',
+                      0,
+                      ep.file_path
+                    )}
+                  >
+                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', display: 'block' }}>
+                      Épisode {ep.num}
+                    </span>
+                    <span style={{
+                      fontSize: '0.72rem',
+                      color: 'var(--text-muted)',
+                      display: 'block',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}>
+                      {ep.filename}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <button
+                      className="btn btn-icon btn-secondary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteConfirm({
+                          type: 'episodes',
+                          animeTitle: currentAnime.anime_title,
+                          singlePath: ep.file_path
+                        });
+                      }}
+                      style={{ width: '28px', height: '28px', color: 'var(--text-muted)' }}
+                      title="Supprimer cet épisode"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Delete Confirmation Modal */}
+        {deleteConfirm && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.8)',
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '20px'
+            }}
+            onClick={() => setDeleteConfirm(null)}
+          >
+            <div
+              className="surface animate-fade-in"
+              style={{
+                background: 'var(--bg-surface)',
+                borderRadius: 'var(--radius-md)',
+                padding: '24px',
+                maxWidth: '440px',
+                width: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '16px',
+                border: '1px solid var(--border-color)'
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#f85149' }}>
+                <AlertTriangle size={24} />
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: '#fff' }}>
+                  Confirmation de suppression
+                </h3>
+              </div>
+
+              <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: '1.5', margin: 0 }}>
+                {deleteConfirm.type === 'anime' ? (
+                  <>Êtes-vous sûr de vouloir supprimer tous les épisodes de <strong>{deleteConfirm.animeTitle}</strong> du disque ? Vos statistiques et votre historique seront conservés.</>
+                ) : deleteConfirm.singlePath ? (
+                  <>Êtes-vous sûr de vouloir supprimer cet épisode du disque ?</>
+                ) : (
+                  <>Êtes-vous sûr de vouloir supprimer les <strong>{selectedCount}</strong> épisodes sélectionnés ?</>
+                )}
+              </p>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>
+                  Annuler
+                </button>
+                <button
+                  className="btn btn-primary"
+                  style={{ background: '#f85149', borderColor: '#f85149' }}
+                  disabled={isDeleting}
+                  onClick={() => {
+                    if (deleteConfirm.type === 'anime') {
+                      handleDeleteAnime(deleteConfirm.animeTitle);
+                    } else if (deleteConfirm.singlePath) {
+                      setIsDeleting(true);
+                      fetch(`/api/library/episode?file_path=${encodeURIComponent(deleteConfirm.singlePath)}`, { method: 'DELETE' })
+                        .then(() => {
+                          setDeleteConfirm(null);
+                          fetchLibrary();
+                        })
+                        .finally(() => setIsDeleting(false));
+                    } else {
+                      handleDeleteSelectedEpisodes();
+                    }
+                  }}
+                >
+                  {isDeleting ? 'Suppression...' : 'Supprimer définitivement'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // --- VIEW 1: MAIN GALLERY OF DOWNLOADED ANIMES ---
   return (
     <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <HardDrive size={22} color="#3FB950" />
-          <h2 style={{ fontSize: '1.3rem', fontWeight: 800 }}>Médiathèque Locale Hors-Ligne</h2>
+          <h2 style={{ fontSize: '1.3rem', fontWeight: 800, margin: 0 }}>Médiathèque Locale</h2>
           <span className="badge" style={{ background: 'rgba(46, 160, 67, 0.2)', color: '#3FB950' }}>
-            {library.length} série(s) disponible(s)
+            {library.length} série(s)
           </span>
         </div>
         <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 12px' }} onClick={fetchLibrary}>
-          <RefreshCw size={13} /> Re-scanner le disque
+          <RefreshCw size={13} /> Re-scanner
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-        {library.map((anime, idx) => (
-          <div
-            key={idx}
-            className="surface-card"
-            style={{
-              padding: '18px',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-color)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '14px'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '10px' }}>
-              <div>
-                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#fff' }}>{anime.anime_title}</h3>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                  {anime.total_episodes} épisode(s) téléchargé(s)
-                </span>
+      {/* Grid of anime cards with real posters */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gap: '16px'
+      }}>
+        {library.map((anime, idx) => {
+          const totalSize = anime.seasons.reduce((acc, s) => acc + s.episodes.reduce((a, e) => a + e.size_mb, 0), 0);
+
+          return (
+            <div
+              key={idx}
+              className="surface-card animate-fade-in"
+              style={{
+                borderRadius: 'var(--radius-sm)',
+                overflow: 'hidden',
+                cursor: 'pointer',
+                position: 'relative',
+                transition: 'transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease',
+                display: 'flex',
+                flexDirection: 'column',
+                border: '1px solid var(--border-color)',
+                background: '#161B22'
+              }}
+              onClick={() => { setSelectedAnimeTitle(anime.anime_title); setActiveSeasonIdx(0); }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-4px)';
+                e.currentTarget.style.borderColor = 'var(--accent-cyan)';
+                e.currentTarget.style.boxShadow = '0 8px 24px rgba(0,0,0,0.6)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.borderColor = 'var(--border-color)';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              {/* Card Cover with Badges */}
+              <div style={{ position: 'relative', width: '100%', height: '260px', overflow: 'hidden', background: '#0D1117' }}>
+                {anime.cover ? (
+                  <img
+                    src={anime.cover}
+                    alt={anime.anime_title}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                      if (e.currentTarget.nextSibling) e.currentTarget.nextSibling.style.display = 'flex';
+                    }}
+                  />
+                ) : null}
+
+                {/* Graceful gradient fallback */}
+                <div style={{
+                  width: '100%',
+                  height: '100%',
+                  background: `linear-gradient(135deg, hsl(${(anime.anime_title.charCodeAt(0) * 37) % 360}, 60%, 25%), hsl(${(anime.anime_title.charCodeAt(0) * 37 + 60) % 360}, 50%, 15%))`,
+                  display: anime.cover ? 'none' : 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexDirection: 'column',
+                  gap: '8px'
+                }}>
+                  <Film size={36} color="rgba(255,255,255,0.3)" />
+                  <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>
+                    {anime.total_episodes} ép.
+                  </span>
+                </div>
+
+                {/* Disk Size Badge */}
+                <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5 }}>
+                  <span className="badge" style={{ background: 'rgba(46, 160, 67, 0.3)', color: '#3FB950', border: '1px solid rgba(46, 160, 67, 0.4)', fontSize: '0.68rem', backdropFilter: 'blur(4px)' }}>
+                    💾 {Math.round(totalSize)} Mo
+                  </span>
+                </div>
+
+                {/* Episode count badge */}
+                <div style={{ position: 'absolute', top: '8px', right: '8px', zIndex: 5 }}>
+                  <span className="badge" style={{ background: 'rgba(0, 0, 0, 0.65)', color: '#fff', fontSize: '0.68rem', backdropFilter: 'blur(4px)' }}>
+                    {anime.total_episodes} ép.
+                  </span>
+                </div>
+
+                {/* Play Hover Overlay */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    background: 'linear-gradient(to top, rgba(13, 17, 23, 0.85) 0%, transparent 60%)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: 0,
+                    transition: 'opacity 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                  onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
+                >
+                  <div style={{
+                    width: '44px',
+                    height: '44px',
+                    borderRadius: '50%',
+                    background: '#3FB950',
+                    color: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 0 16px rgba(63, 185, 80, 0.6)'
+                  }}>
+                    <Play size={18} fill="#fff" style={{ marginLeft: '2px' }} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Card Title */}
+              <div style={{ padding: '10px 12px' }}>
+                <h3 style={{
+                  fontSize: '0.9rem',
+                  fontWeight: 700,
+                  color: '#fff',
+                  margin: 0,
+                  lineHeight: '1.3',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden'
+                }}>
+                  {anime.anime_title}
+                </h3>
               </div>
             </div>
-
-            {/* Seasons */}
-            {anime.seasons.map((season, sIdx) => (
-              <div key={sIdx} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.9rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>
-                  <Folder size={15} />
-                  <span>{season.season_name}</span>
-                </div>
-
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-                  gap: '10px'
-                }}>
-                  {season.episodes.map((ep, epIdx) => (
-                    <div
-                      key={epIdx}
-                      style={{
-                        background: '#0D1117',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: 'var(--radius-sm)',
-                        padding: '10px 12px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '8px'
-                      }}
-                    >
-                      <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                        <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>
-                          Épisode {ep.num}
-                        </span>
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                          {ep.size_mb} Mo
-                        </span>
-                      </div>
-
-                      <button
-                        className="btn btn-primary"
-                        style={{ padding: '5px 10px', fontSize: '0.78rem' }}
-                        onClick={() => onPlayEpisode(
-                          anime.anime_title,
-                          season.season_name,
-                          { num: ep.num, title: `Épisode ${ep.num}` },
-                          season.episodes.map(e => ({ num: e.num, title: `Épisode ${e.num}` })),
-                          '',
-                          0,
-                          ep.file_path
-                        )}
-                      >
-                        <Play size={12} fill="#fff" /> Lire Local
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

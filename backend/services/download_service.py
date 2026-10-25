@@ -48,6 +48,33 @@ class DownloadTask:
             "file_path": self.file_path
         }
 
+def normalize_anime_and_season(anime_title: str, season: str):
+    t_clean = anime_title.strip()
+    s_clean = season.strip()
+    
+    # Specific handling for High School DxD franchise
+    if re.search(r'high school dxd new', t_clean, re.IGNORECASE):
+        return "High School DxD", "Saison 2"
+    if re.search(r'high school dxd born', t_clean, re.IGNORECASE):
+        return "High School DxD", "Saison 3"
+    if re.search(r'high school dxd hero', t_clean, re.IGNORECASE):
+        return "High School DxD", "Saison 4"
+    if re.search(r'high school dxd (?:ova|oav)', t_clean, re.IGNORECASE):
+        return "High School DxD", "OAV"
+
+    # General sequel patterns
+    m_sec = re.search(r'^(.*?)\s+(?:2nd|second)\s*season$', t_clean, re.IGNORECASE)
+    if m_sec:
+        return m_sec.group(1), "Saison 2"
+    m_3rd = re.search(r'^(.*?)\s+(?:3rd|third)\s*season$', t_clean, re.IGNORECASE)
+    if m_3rd:
+        return m_3rd.group(1), "Saison 3"
+    m_4th = re.search(r'^(.*?)\s+(?:4th|fourth)\s*season$', t_clean, re.IGNORECASE)
+    if m_4th:
+        return m_4th.group(1), "Saison 4"
+
+    return t_clean, s_clean
+
 class DownloadService:
     def __init__(self):
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -126,17 +153,52 @@ class DownloadService:
     async def _download_task(self, task: DownloadTask):
         try:
             root_folder = settings_service.get_root_folder()
-            safe_anime = sanitize_filename(task.anime_title)
-            safe_season = sanitize_filename(task.season)
-            ep_name = f"Episode_{task.episode_num}.mp4"
+            norm_anime, norm_season = normalize_anime_and_season(task.anime_title, task.season)
+            safe_anime = sanitize_filename(norm_anime)
+            safe_season = sanitize_filename(norm_season)
+
+            # Auto-save anime cover.jpg if missing
+            anime_dir = os.path.join(root_folder, "nami", "anime", safe_anime)
+            os.makedirs(anime_dir, exist_ok=True)
+            cover_dest = os.path.join(anime_dir, "cover.jpg")
+            if not os.path.exists(cover_dest) or os.path.getsize(cover_dest) < 1000:
+                try:
+                    from backend.services.cache_service import cache_service
+                    cov_url = cache_service._find_anime_cover(norm_anime, anime_dir)
+                    if not cov_url:
+                        from backend.services.catalog_service import catalog_service
+                        cov_url = catalog_service._get_voiranime_cached_cover(task.anime_title) or catalog_service._get_voiranime_cached_cover(norm_anime)
+                    if cov_url:
+                        cache_service._save_local_cover_async(cov_url, anime_dir)
+                except Exception as cov_err:
+                    print(f"[DownloadService] Warning saving cover.jpg: {cov_err}")
+
+            # Sanitize episode number: extract the actual number to avoid long dirty names
+            nums = re.findall(r'\d+', str(task.episode_num))
+            if nums:
+                clean_ep_num = str(int(nums[-1])).zfill(2)
+            else:
+                clean_ep_num = "01"
+            ep_name = f"Episode_{clean_ep_num}.mp4"
+
+            # Auto-resolve stream if it's a page or embed link
+            if "voir-anime.to" in task.stream_url or ("http" in task.stream_url and not any(ext in task.stream_url for ext in [".m3u8", ".mp4", ".ts"])):
+                try:
+                    from backend.services.catalog_service import catalog_service
+                    resolved = await catalog_service.resolve_stream(task.stream_url)
+                    if resolved and resolved.get("stream_url"):
+                        task.stream_url = resolved["stream_url"]
+                        task.stream_type = resolved.get("stream_type", "m3u8")
+                except Exception as e:
+                    print(f"[DownloadService] Stream pre-resolution error: {e}")
 
             # Create output directory structure: root/nami/anime/{anime_title}/{season}/{ep_name}
-            output_dir = os.path.join(root_folder, "nami", "anime", safe_anime, safe_season)
+            output_dir = os.path.join(anime_dir, safe_season)
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, ep_name)
             task.file_path = output_file
 
-            print(f"[DownloadService] Starting download for {task.anime_title} Ep {task.episode_num} -> {output_file}")
+            print(f"[DownloadService] Starting download for {norm_anime} ({norm_season}) Ep {clean_ep_num} -> {output_file}")
 
             if task.stream_type == "m3u8" or ".m3u8" in task.stream_url:
                 await self._download_hls_ffmpeg(task, output_file)
@@ -157,7 +219,7 @@ class DownloadService:
             asyncio.create_task(self._process_queue())
 
     async def _download_hls_ffmpeg(self, task: DownloadTask, output_file: str):
-        # Use ffmpeg command line to download m3u8 stream
+        # 1. Try ffmpeg command line to download m3u8 stream
         cmd = [
             "ffmpeg", "-y",
             "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
@@ -167,31 +229,50 @@ class DownloadService:
             output_file
         ]
         
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            while proc.returncode is None:
+                if task.status == "cancelled":
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+                await asyncio.sleep(1)
+                if task.progress < 95.0:
+                    task.progress += 2.5
+                self._save_tasks()
+
+            await proc.wait()
+            if proc.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                return
+        except Exception as e:
+            print(f"[DownloadService] ffmpeg execution error: {e}")
+
+        # 2. Fallback to yt-dlp if ffmpeg failed or exited with error
+        print(f"[DownloadService] FFmpeg failed, running yt-dlp fallback for {task.anime_title}...")
+        yt_cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-check-certificates",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "-o", output_file,
+            task.stream_url
+        ]
+        yt_proc = await asyncio.create_subprocess_exec(
+            *yt_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-
-        while proc.returncode is None:
-            if task.status == "cancelled":
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                return
-            await asyncio.sleep(1)
-            # Simulating steady progress update for ffmpeg task
-            if task.progress < 95.0:
-                task.progress += 2.5
-            self._save_tasks()
-
-        await proc.wait()
-        if proc.returncode != 0:
-            stderr_bytes = await proc.stderr.read()
-            stderr_msg = stderr_bytes.decode("utf-8", errors="ignore")
-            # If ffmpeg failed, fallback to direct download or report error
-            raise Exception(f"FFmpeg error: {stderr_msg[-200:]}")
+        await yt_proc.wait()
+        if yt_proc.returncode != 0:
+            stderr_b = await yt_proc.stderr.read()
+            raise Exception(f"Download failed: {stderr_b.decode('utf-8', errors='ignore')[-200:]}")
 
     async def _download_http_file(self, task: DownloadTask, output_file: str):
         async with aiohttp.ClientSession() as session:

@@ -26,9 +26,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('nami_active_user');
-      return saved ? JSON.parse(saved) : { id: 'default', username: 'Utilisateur', avatar: '👤' };
+      return saved ? JSON.parse(saved) : null;
     } catch {
-      return { id: 'default', username: 'Utilisateur', avatar: '👤' };
+      return null;
     }
   });
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -43,15 +43,37 @@ export default function App() {
   // Downloads state
   const [downloads, setDownloads] = useState([]);
 
-  const userId = currentUser?.id || 'default';
+  const userId = currentUser?.id || 'guest';
 
   // Save active user to localStorage when changed
   const handleSelectUser = (user) => {
     setCurrentUser(user);
     try {
-      localStorage.setItem('nami_active_user', JSON.stringify(user));
+      if (user) {
+        localStorage.setItem('nami_active_user', JSON.stringify(user));
+      } else {
+        localStorage.removeItem('nami_active_user');
+      }
     } catch {}
   };
+
+  // Check if users exist on startup, force AuthModal if zero users or not logged in
+  useEffect(() => {
+    fetch('/api/users')
+      .then((res) => res.json())
+      .then((data) => {
+        const uList = data || [];
+        if (uList.length === 0) {
+          setCurrentUser(null);
+          try { localStorage.removeItem('nami_active_user'); } catch {}
+          setIsAuthOpen(true);
+        } else if (!currentUser || !uList.some((u) => u.id === currentUser.id)) {
+          setCurrentUser(null);
+          setIsAuthOpen(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Fetch continue watching & recent items for current user
   const loadUserShelves = useCallback(() => {
@@ -135,20 +157,77 @@ export default function App() {
     });
   };
 
-  const handleResumeFromShelf = (item) => {
+  const handleResumeFromShelf = async (item) => {
+    const initialEp = {
+      num: item.episode_num,
+      title: `Épisode ${item.episode_num}`,
+      embed_url: item.embed_url,
+      file_path: item.file_path
+    };
+
     setActivePlayer({
       animeTitle: item.anime_title,
       cover: item.cover,
       season: item.season,
-      episode: {
-        num: item.episode_num,
-        title: `Épisode ${item.episode_num}`,
-        embed_url: item.embed_url
-      },
-      episodes: [{ num: item.episode_num, title: `Épisode ${item.episode_num}`, embed_url: item.embed_url }],
+      episode: initialEp,
+      episodes: [initialEp],
       initialTime: item.position_sec,
       initialFilePath: item.file_path
     });
+
+    // Background hydrate full season episodes so auto-advance and episode drawer work seamlessly
+    try {
+      let animeDetails = null;
+      const recentMatch = recentAnimes.find(
+        (a) => a.title && a.title.toLowerCase() === item.anime_title.toLowerCase()
+      );
+      if (recentMatch && recentMatch.url && recentMatch.source) {
+        const res = await fetch(`/api/details?url=${encodeURIComponent(recentMatch.url)}&source=${encodeURIComponent(recentMatch.source)}`);
+        if (res.ok) animeDetails = await res.json();
+      } else {
+        const searchRes = await fetch(`/api/search?q=${encodeURIComponent(item.anime_title)}`);
+        if (searchRes.ok) {
+          const searchData = await searchRes.json();
+          const match = (searchData.results || []).find(
+            (a) => a.title && a.title.toLowerCase() === item.anime_title.toLowerCase()
+          ) || searchData.results?.[0];
+          if (match && match.url && match.source) {
+            const res = await fetch(`/api/details?url=${encodeURIComponent(match.url)}&source=${encodeURIComponent(match.source)}`);
+            if (res.ok) animeDetails = await res.json();
+          }
+        }
+      }
+
+      if (animeDetails) {
+        let fullEps = [];
+        if (animeDetails.episodes && animeDetails.episodes.length > 0) {
+          fullEps = animeDetails.episodes;
+        } else if (animeDetails.seasons && animeDetails.seasons.length > 0) {
+          const matchedSeason = animeDetails.seasons.find((s) => s.name === item.season) || animeDetails.seasons[0];
+          const epsRes = await fetch(
+            `/api/episodes?season_url=${encodeURIComponent(matchedSeason.url || matchedSeason.raw_link)}&anime_title=${encodeURIComponent(item.anime_title)}&season_name=${encodeURIComponent(matchedSeason.name)}`
+          );
+          if (epsRes.ok) {
+            const epsData = await epsRes.json();
+            fullEps = epsData.episodes || [];
+          }
+        }
+
+        if (fullEps && fullEps.length > 0) {
+          setActivePlayer((prev) => {
+            if (!prev || prev.animeTitle !== item.anime_title) return prev;
+            const matchedEp = fullEps.find((e) => String(e.num) === String(item.episode_num)) || prev.episode;
+            return {
+              ...prev,
+              episode: { ...matchedEp, file_path: prev.episode?.file_path || matchedEp.file_path },
+              episodes: fullEps
+            };
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Could not background hydrate episodes for resume:", e);
+    }
   };
 
   const handleDownloadEpisode = (animeTitle, season, episode) => {
@@ -220,6 +299,7 @@ export default function App() {
             results={results}
             isLoading={isLoading}
             searchQuery={searchQuery}
+            activeSource={activeSource}
             continueWatching={continueWatching}
             recentAnimes={recentAnimes}
             randomSuggestions={randomSuggestions}
@@ -275,7 +355,7 @@ export default function App() {
           }}
           onDownloadEpisode={handleDownloadEpisode}
           onSelectNextEpisode={(nextEp) => {
-            setActivePlayer((prev) => ({ ...prev, episode: nextEp, initialTime: 0, initialFilePath: null }));
+            setActivePlayer((prev) => ({ ...prev, episode: nextEp, initialTime: 0, initialFilePath: nextEp.file_path || null }));
           }}
         />
       )}

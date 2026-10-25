@@ -3,7 +3,10 @@ import json
 import time
 import random
 import re
+import threading
+import httpx
 from typing import Optional, List, Dict
+from urllib.parse import quote
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
@@ -13,18 +16,18 @@ CATALOG_INDEX_FILE = os.path.join(CACHE_DIR, "catalog_index.json")
 
 # Starter recommendations for instant discovery even before scraping full catalogs
 POPULAR_STARTER_ANIMES = [
-    {"title": "Frieren", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/frieren/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/frieren.jpg"},
-    {"title": "Jujutsu Kaisen", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/jujutsu-kaisen/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/jujutsu-kaisen.jpg"},
-    {"title": "Demon Slayer", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/demon-slayer/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/demon-slayer.jpg"},
-    {"title": "One Piece", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/one-piece/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/one-piece.jpg"},
-    {"title": "Solo Leveling", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/solo-leveling/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/solo-leveling.jpg"},
-    {"title": "L'Attaque des Titans", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/lattaque-des-titans/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/lattaque-des-titans.jpg"},
-    {"title": "Chainsaw Man", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/chainsaw-man/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/chainsaw-man.jpg"},
-    {"title": "Hunter x Hunter", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/hunter-x-hunter-2011/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/hunter-x-hunter-2011.jpg"},
-    {"title": "Bleach", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/bleach/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/bleach.jpg"},
-    {"title": "Mashle", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/mashle/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/mashle.jpg"},
-    {"title": "Spy x Family", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/spy-x-family/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/spy-x-family.jpg"},
-    {"title": "Oshi no Ko", "source": "anime_sama", "url": "https://anime-sama.fr/catalogue/oshi-no-ko/", "cover": "https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/oshi-no-ko.jpg"},
+    {"title": "Frieren", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/frieren/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/frieren.jpg"},
+    {"title": "Jujutsu Kaisen", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/jujutsu-kaisen/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/jujutsu-kaisen.jpg"},
+    {"title": "Demon Slayer", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/demon-slayer/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/demon-slayer.jpg"},
+    {"title": "One Piece", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/one-piece/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/one-piece.jpg"},
+    {"title": "Solo Leveling", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/solo-leveling/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/solo-leveling.jpg"},
+    {"title": "L'Attaque des Titans", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/shingeki-no-kyojin/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/shingeki-no-kyojin.jpg"},
+    {"title": "Chainsaw Man", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/chainsaw-man/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/chainsaw-man.jpg"},
+    {"title": "Hunter x Hunter", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/hunter-x-hunter/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/hunter-x-hunter.jpg"},
+    {"title": "Bleach", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/bleach/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/bleach.jpg"},
+    {"title": "Mashle", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/mashle/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/mashle.jpg"},
+    {"title": "Spy x Family", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/spy-x-family/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/spy-x-family.jpg"},
+    {"title": "Oshi no Ko", "source": "anime_sama", "url": "https://anime-sama.to/catalogue/oshi-no-ko/", "cover": "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/oshi-no-ko.jpg"},
 ]
 
 def sanitize_cache_key(key: str) -> str:
@@ -135,6 +138,92 @@ class CacheService:
         random.shuffle(deduped)
         return deduped[:count]
 
+    def _save_local_cover_async(self, cover_url: str, anime_path: str):
+        """Asynchronously fetches and saves the cover image to cover.jpg inside anime folder."""
+        def _fetch_and_save():
+            try:
+                dest = os.path.join(anime_path, "cover.jpg")
+                if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                    return
+                target = cover_url
+                if "/api/proxy/image?url=" in target:
+                    target = target.split("/api/proxy/image?url=")[-1]
+                headers = {"User-Agent": "Mozilla/5.0"}
+                if "voir-anime" in target:
+                    headers["Referer"] = "https://voir-anime.to/"
+                elif "anime-sama" in target:
+                    headers["Referer"] = "https://anime-sama.fr/"
+                with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                    resp = client.get(target, headers=headers)
+                    if resp.status_code == 200 and len(resp.content) > 1000:
+                        with open(dest, "wb") as f:
+                            f.write(resp.content)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_fetch_and_save, daemon=True)
+        t.start()
+
+    def _find_anime_cover(self, display_title: str, anime_path: str) -> str:
+        # 1. Local cover on disk
+        for ext in [".jpg", ".jpeg", ".png", ".webp"]:
+            local_cov = os.path.join(anime_path, f"cover{ext}")
+            if os.path.exists(local_cov) and os.path.getsize(local_cov) > 1000:
+                return f"/api/stream/local?file_path={quote(local_cov)}"
+            poster_cov = os.path.join(anime_path, f"poster{ext}")
+            if os.path.exists(poster_cov) and os.path.getsize(poster_cov) > 1000:
+                return f"/api/stream/local?file_path={quote(poster_cov)}"
+
+        clean_name = display_title.lower().strip()
+
+        # 2. History database
+        hist_file = os.path.join(DATA_DIR, "history.json")
+        if os.path.exists(hist_file):
+            try:
+                with open(hist_file, "r", encoding="utf-8") as f:
+                    hdata = json.load(f)
+                    for user_records in hdata.values():
+                        if isinstance(user_records, dict):
+                            for atitle, rec in user_records.items():
+                                if atitle.lower().strip() == clean_name and rec.get("cover"):
+                                    cov_url = rec["cover"]
+                                    self._save_local_cover_async(cov_url, anime_path)
+                                    return cov_url
+            except Exception:
+                pass
+
+        # 3. VoirAnime covers.json
+        va_covers = os.path.join(DATA_DIR, "submodules", "voiranime_API", "data", "covers.json")
+        if not os.path.exists(va_covers):
+            va_covers = os.path.join(os.path.dirname(DATA_DIR), "voiranime_API", "data", "covers.json")
+        if os.path.exists(va_covers):
+            try:
+                with open(va_covers, "r", encoding="utf-8") as f:
+                    vdata = json.load(f)
+                    for t, c in vdata.items():
+                        if c and (t.lower().strip() == clean_name or clean_name in t.lower() or t.lower() in clean_name):
+                            self._save_local_cover_async(c, anime_path)
+                            return f"/api/proxy/image?url={quote(c, safe='')}"
+            except Exception:
+                pass
+
+        # 4. Popular starter list
+        for starter in POPULAR_STARTER_ANIMES:
+            if starter.get("title", "").lower().strip() == clean_name:
+                c = starter.get("cover", "")
+                if c:
+                    self._save_local_cover_async(c, anime_path)
+                    return c
+
+        # 5. Fallback to Anime-Sama Statically CDN by slug
+        clean_slug = re.sub(r'[^a-z0-9]+', '-', clean_name).strip('-')
+        if clean_slug:
+            as_cdn = f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{clean_slug}.jpg"
+            self._save_local_cover_async(as_cdn, anime_path)
+            return as_cdn
+
+        return ""
+
     # --- Scan Local Downloaded Media on Disk ---
     def scan_downloaded_library(self, root_folder: str) -> List[dict]:
         base_dir = os.path.join(root_folder, "nami", "anime")
@@ -149,6 +238,7 @@ class CacheService:
                     continue
 
                 display_title = anime_folder.replace("_", " ")
+                cover = self._find_anime_cover(display_title, anime_path)
                 seasons_found = []
 
                 for season_folder in os.listdir(anime_path):
@@ -174,6 +264,7 @@ class CacheService:
                                 "num": ep_num,
                                 "filename": ep_file,
                                 "file_path": full_ep_path,
+                                "thumbnail": f"/api/stream/thumbnail?file_path={quote(full_ep_path)}",
                                 "size_mb": file_size_mb
                             })
 
@@ -189,6 +280,7 @@ class CacheService:
                     results.append({
                         "anime_title": display_title,
                         "folder": anime_folder,
+                        "cover": cover,
                         "seasons": seasons_found,
                         "total_episodes": total_eps
                     })

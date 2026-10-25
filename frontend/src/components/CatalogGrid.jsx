@@ -2,9 +2,10 @@ import React from 'react';
 import { Play, RotateCcw, Shuffle, Sparkles, Clock, History, Film } from 'lucide-react';
 
 export default function CatalogGrid({
-  results,
+  results = [],
   isLoading,
   searchQuery,
+  activeSource = 'all',
   continueWatching = [],
   recentAnimes = [],
   randomSuggestions = [],
@@ -18,6 +19,27 @@ export default function CatalogGrid({
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
+
+  const filteredContinueWatching = (continueWatching || []).filter((item) => {
+    if (activeSource === 'all') return true;
+    if (item.source) return item.source === activeSource;
+    return true;
+  });
+
+  const filteredRecentAnimes = (recentAnimes || []).filter((anime) => {
+    if (activeSource === 'all') return true;
+    return anime.source === activeSource;
+  });
+
+  const filteredRandomSuggestions = (randomSuggestions || []).filter((anime) => {
+    if (activeSource === 'all') return true;
+    return anime.source === activeSource;
+  });
+
+  const filteredResults = (results || []).filter((anime) => {
+    if (activeSource === 'all') return true;
+    return anime.source === activeSource;
+  });
 
   if (isLoading) {
     return (
@@ -43,7 +65,7 @@ export default function CatalogGrid({
   return (
     <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '32px' }}>
       {/* 1. Continuer la lecture (Resume Watching Shelf) */}
-      {isBrowsingHome && continueWatching && continueWatching.length > 0 && (
+      {isBrowsingHome && filteredContinueWatching && filteredContinueWatching.length > 0 && (
         <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <RotateCcw size={18} color="var(--primary)" />
@@ -55,7 +77,7 @@ export default function CatalogGrid({
             gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
             gap: '14px'
           }}>
-            {continueWatching.slice(0, 6).map((item, idx) => (
+            {filteredContinueWatching.slice(0, 6).map((item, idx) => (
               <div
                 key={idx}
                 className="surface-card animate-fade-in"
@@ -107,7 +129,7 @@ export default function CatalogGrid({
       )}
 
       {/* 2. Récemment consultés & Recherchés */}
-      {isBrowsingHome && recentAnimes && recentAnimes.length > 0 && (
+      {isBrowsingHome && filteredRecentAnimes && filteredRecentAnimes.length > 0 && (
         <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <History size={18} color="var(--accent-cyan)" />
@@ -119,7 +141,7 @@ export default function CatalogGrid({
             gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
             gap: '12px'
           }}>
-            {recentAnimes.slice(0, 6).map((anime, idx) => (
+            {filteredRecentAnimes.slice(0, 6).map((anime, idx) => (
               <div
                 key={idx}
                 className="surface-card animate-fade-in"
@@ -154,7 +176,7 @@ export default function CatalogGrid({
       )}
 
       {/* 3. Découverte & Aléatoire */}
-      {isBrowsingHome && randomSuggestions && randomSuggestions.length > 0 && (
+      {isBrowsingHome && filteredRandomSuggestions && filteredRandomSuggestions.length > 0 && (
         <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -177,7 +199,7 @@ export default function CatalogGrid({
             gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
             gap: '14px'
           }}>
-            {randomSuggestions.slice(0, 6).map((anime, idx) => (
+            {filteredRandomSuggestions.slice(0, 6).map((anime, idx) => (
               <div
                 key={idx}
                 className="surface-card animate-fade-in"
@@ -215,11 +237,11 @@ export default function CatalogGrid({
       <section style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>
-            {searchQuery ? `Résultats pour "${searchQuery}" (${results.length})` : 'Catalogue complet'}
+            {searchQuery ? `Résultats pour "${searchQuery}" (${filteredResults.length})` : 'Catalogue complet'}
           </h2>
         </div>
 
-        {results.length === 0 ? (
+        {filteredResults.length === 0 ? (
           <div style={{
             display: 'flex',
             flexDirection: 'column',
@@ -242,7 +264,7 @@ export default function CatalogGrid({
             gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
             gap: '16px'
           }}>
-            {results.map((anime, index) => {
+            {filteredResults.map((anime, index) => {
               const isAnimeSama = anime.source === 'anime_sama';
               return (
                 <div

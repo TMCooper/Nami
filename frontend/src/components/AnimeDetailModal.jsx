@@ -56,12 +56,13 @@ export default function AnimeDetailModal({
 
   const loadSeasonEpisodes = (seasonUrl, seasonName = 'Saison 1', forceRefresh = false) => {
     setIsLoadingEpisodes(true);
-    fetch(`/api/episodes?season_url=${encodeURIComponent(seasonUrl)}&refresh=${forceRefresh}`)
+    const targetTitle = details?.title || anime?.title || '';
+    fetch(`/api/episodes?season_url=${encodeURIComponent(seasonUrl)}&anime_title=${encodeURIComponent(targetTitle)}&season_name=${encodeURIComponent(seasonName)}&refresh=${forceRefresh}`)
       .then((res) => res.json())
       .then((data) => {
         const eps = data.episodes || [];
         setEpisodes(eps);
-        checkDownloadedStatus(details?.title || anime?.title, seasonName);
+        checkDownloadedStatus(targetTitle, seasonName);
       })
       .catch((err) => console.error("Error loading episodes:", err))
       .finally(() => setIsLoadingEpisodes(false));

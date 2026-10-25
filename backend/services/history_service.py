@@ -234,4 +234,26 @@ class HistoryService:
             "animes_in_progress": max(0, total_animes_started - animes_completed)
         }
 
+    def delete_item(self, user_id: str, anime_title: str, ep_key: Optional[str] = None):
+        """Removes a specific episode or an entire anime from the user's watch history."""
+        uid = user_id or "default"
+        if uid in self.history and anime_title in self.history[uid]:
+            if ep_key:
+                eps = self.history[uid][anime_title].get("episodes", {})
+                if ep_key in eps:
+                    del eps[ep_key]
+                if not eps:
+                    del self.history[uid][anime_title]
+            else:
+                del self.history[uid][anime_title]
+            self._save()
+
+    def clear_user_history(self, user_id: str):
+        """Clears all watch history records for a given user."""
+        uid = user_id or "default"
+        if uid in self.history:
+            self.history[uid] = {}
+            self._save()
+
 history_service = HistoryService()
+

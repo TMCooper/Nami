@@ -1,8 +1,12 @@
 import os
 import re
+import shutil
+import base64
 import mimetypes
-from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status
-from fastapi.responses import StreamingResponse, Response
+import hashlib
+import subprocess
+from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
+from fastapi.responses import StreamingResponse, Response, FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from urllib.parse import unquote
@@ -102,6 +106,43 @@ async def get_current_user(x_user_id: Optional[str] = Header("default")):
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")
     return user
 
+@router.post("/auth/avatar")
+async def upload_avatar(x_user_id: Optional[str] = Header("default"), file: UploadFile = File(...)):
+    """Upload a custom profile picture. Stored as base64 data URI in user data."""
+    uid = x_user_id or "default"
+    if uid not in user_service.users:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:  # 2MB max
+        raise HTTPException(status_code=400, detail="L'image ne doit pas dépasser 2 Mo.")
+
+    mime = file.content_type or "image/png"
+    b64 = base64.b64encode(content).decode("utf-8")
+    data_uri = f"data:{mime};base64,{b64}"
+
+    user_service.users[uid]["avatar"] = data_uri
+    user_service._save()
+
+    return {
+        "id": uid,
+        "username": user_service.users[uid]["username"],
+        "avatar": data_uri
+    }
+
+@router.patch("/auth/profile")
+async def update_profile(x_user_id: Optional[str] = Header("default"), avatar: Optional[str] = Body(None, embed=True)):
+    """Update user profile fields (e.g. emoji avatar)."""
+    uid = x_user_id or "default"
+    if uid not in user_service.users:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+
+    if avatar is not None:
+        user_service.users[uid]["avatar"] = avatar
+        user_service._save()
+
+    return user_service.get_user(uid)
+
 @router.get("/users/stats")
 async def get_user_stats(x_user_id: Optional[str] = Header("default")):
     stats = history_service.get_user_stats(user_id=x_user_id or "default")
@@ -154,10 +195,23 @@ async def get_details(
 
 @router.get("/episodes")
 async def get_season_episodes(
-    season_url: str = Query(..., description="URL de la saison (AnimeSama)"),
+    season_url: str = Query(..., description="URL de la saison (AnimeSama ou VoirAnime)"),
+    anime_title: Optional[str] = Query("", description="Titre de l'anime"),
+    season_name: Optional[str] = Query("Saison 1", description="Nom de la saison"),
+    version: Optional[str] = Query("vostfr", description="Version (vostfr ou vf)"),
     refresh: bool = Query(False, description="Forcer l'invalidation du cache")
 ):
-    episodes = await catalog_service.fetch_anime_sama_episodes(season_url, refresh=refresh)
+    if "voir-anime" in season_url:
+        va_details = await catalog_service.get_details(url=season_url, source="voiranime", refresh=refresh)
+        episodes = va_details.get("episodes", [])
+    else:
+        episodes = await catalog_service.fetch_anime_sama_episodes(
+            season_url=season_url,
+            anime_title=anime_title or "",
+            season_name=season_name or "Saison 1",
+            version=version or "vostfr",
+            refresh=refresh
+        )
     return {"total": len(episodes), "episodes": episodes}
 
 @router.get("/resolve")
@@ -227,6 +281,46 @@ async def stream_local_video(file_path: str = Query(..., description="Chemin du 
     }
     return StreamingResponse(iter_full(), headers=headers)
 
+@router.get("/stream/thumbnail")
+async def get_video_thumbnail(file_path: str = Query(..., description="Chemin absolu du fichier vidéo local")):
+    """Generates and caches a video thumbnail at 00:00:30 using ffmpeg."""
+    decoded_path = unquote(file_path).strip()
+    if not os.path.exists(decoded_path) or not os.path.isfile(decoded_path):
+        raise HTTPException(status_code=404, detail="Fichier vidéo introuvable")
+
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
+    thumb_cache_dir = os.path.join(data_dir, "cache", "thumbnails")
+    os.makedirs(thumb_cache_dir, exist_ok=True)
+    h = hashlib.md5(decoded_path.encode("utf-8")).hexdigest()
+    thumb_path = os.path.join(thumb_cache_dir, f"{h}.jpg")
+
+    if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
+        return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
+
+    try:
+        # Run ffmpeg to extract 1 frame at 30 seconds
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", "00:00:30",
+            "-i", decoded_path,
+            "-vframes", "1",
+            "-q:v", "3",
+            thumb_path
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if proc.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
+            return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
+        
+        # Fallback to seeking 5 seconds if 30s is past the end
+        cmd[2] = "00:00:05"
+        proc2 = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if proc2.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
+            return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000"})
+    except Exception as e:
+        print(f"[Thumbnail] Error generating thumbnail for {decoded_path}: {e}")
+
+    raise HTTPException(status_code=500, detail="Impossible de générer la miniature")
+
 # --- Episode Download Status Check & Local Library ---
 @router.get("/episodes/download-status")
 async def check_episodes_downloaded(
@@ -260,6 +354,42 @@ async def get_downloaded_library():
     root_folder = settings_service.get_root_folder()
     lib = cache_service.scan_downloaded_library(root_folder)
     return {"total_animes": len(lib), "library": lib}
+
+@router.delete("/library/episode")
+async def delete_downloaded_episode(file_path: str = Query(..., description="Chemin absolu du fichier épisode")):
+    """Delete a single downloaded episode file from disk. Stats/history are preserved."""
+    decoded_path = unquote(file_path).strip()
+    if not os.path.exists(decoded_path) or not os.path.isfile(decoded_path):
+        raise HTTPException(status_code=404, detail="Fichier introuvable sur le disque.")
+    try:
+        os.remove(decoded_path)
+        # Clean up empty parent directories
+        parent = os.path.dirname(decoded_path)
+        if os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+            grandparent = os.path.dirname(parent)
+            if os.path.isdir(grandparent) and not os.listdir(grandparent):
+                os.rmdir(grandparent)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
+    return {"status": "deleted", "file_path": decoded_path}
+
+@router.delete("/library/anime")
+async def delete_downloaded_anime(
+    anime_title: str = Query(..., description="Titre de l'anime (nom du dossier sanitizé)")
+):
+    """Delete an entire anime folder from disk. Stats/history are preserved."""
+    root_folder = settings_service.get_root_folder()
+    safe_title = sanitize_filename(anime_title)
+    anime_dir = os.path.join(root_folder, "nami", "anime", safe_title)
+
+    if not os.path.exists(anime_dir) or not os.path.isdir(anime_dir):
+        raise HTTPException(status_code=404, detail="Dossier anime introuvable sur le disque.")
+    try:
+        shutil.rmtree(anime_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
+    return {"status": "deleted", "anime_title": anime_title}
 
 # --- Watch History & Progress Routes ---
 @router.get("/history")
@@ -310,6 +440,21 @@ async def mark_season(payload: MarkSeasonPayload, x_user_id: Optional[str] = Hea
         is_watched=payload.watched
     )
     return {"status": "ok"}
+
+@router.delete("/history/item")
+async def delete_history_item(
+    anime_title: str = Query(...),
+    ep_key: Optional[str] = Query(None),
+    x_user_id: Optional[str] = Header("default")
+):
+    history_service.delete_item(x_user_id or "default", anime_title, ep_key)
+    return {"status": "ok"}
+
+@router.delete("/history/clear")
+async def clear_history(x_user_id: Optional[str] = Header("default")):
+    history_service.clear_user_history(x_user_id or "default")
+    return {"status": "ok"}
+
 
 # --- Settings & Download Routes ---
 @router.get("/settings")

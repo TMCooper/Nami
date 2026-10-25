@@ -25,13 +25,16 @@ class UserService:
     def __init__(self):
         os.makedirs(DATA_DIR, exist_ok=True)
         self.users: Dict[str, dict] = self._load()
-        self._ensure_default_user()
 
     def _load(self) -> dict:
         if os.path.exists(USERS_FILE):
             try:
                 with open(USERS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        # Ensure default is never kept
+                        data.pop("default", None)
+                        return data
             except Exception as e:
                 print(f"[UserService] Error loading users DB: {e}")
         return {}
@@ -42,19 +45,6 @@ class UserService:
                 json.dump(self.users, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[UserService] Error saving users DB: {e}")
-
-    def _ensure_default_user(self):
-        if not self.users:
-            # Create a default guest profile if no user exists
-            default_user = {
-                "id": "default",
-                "username": "Utilisateur",
-                "avatar": "👤",
-                "password_hash": hash_password("nami123"),
-                "created_at": time.time()
-            }
-            self.users["default"] = default_user
-            self._save()
 
     def list_users(self) -> List[dict]:
         res = []
@@ -71,6 +61,8 @@ class UserService:
         username_clean = username.strip()
         if not username_clean:
             raise ValueError("Le nom d'utilisateur ne peut pas être vide.")
+        if not password or not password.strip():
+            raise ValueError("Le mot de passe est obligatoire.")
 
         # Check duplicate
         for u in self.users.values():
@@ -78,7 +70,7 @@ class UserService:
                 raise ValueError("Ce nom d'utilisateur existe déjà.")
 
         user_id = f"user_{secrets.token_hex(4)}"
-        p_hash = hash_password(password or "123456")
+        p_hash = hash_password(password.strip())
 
         user_data = {
             "id": user_id,
@@ -108,9 +100,9 @@ class UserService:
         if not target_user:
             raise ValueError("Utilisateur non trouvé.")
 
-        # If user has password set and entered password fails
-        if target_user.get("password_hash") and password:
-            if not verify_password(password, target_user["password_hash"]):
+        # Check password
+        if target_user.get("password_hash"):
+            if not password or not verify_password(password, target_user["password_hash"]):
                 raise ValueError("Mot de passe incorrect.")
 
         return {
@@ -121,9 +113,6 @@ class UserService:
 
     def get_user(self, user_id: str) -> Optional[dict]:
         user = self.users.get(user_id)
-        if not user:
-            # Fallback to default user if user_id unknown
-            user = self.users.get("default")
         if user:
             return {
                 "id": user["id"],

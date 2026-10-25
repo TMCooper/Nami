@@ -50,11 +50,25 @@ export default function StatsModal({ isOpen, onClose, currentUser }) {
       >
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '1.6rem' }}>{currentUser?.avatar || '📊'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {currentUser?.avatar && (currentUser.avatar.startsWith('data:') || currentUser.avatar.startsWith('http')) ? (
+              <img
+                src={currentUser.avatar}
+                alt="Avatar"
+                style={{
+                  width: '44px',
+                  height: '44px',
+                  borderRadius: '50%',
+                  objectFit: 'cover',
+                  border: '2px solid var(--accent-cyan)'
+                }}
+              />
+            ) : (
+              <span style={{ fontSize: '1.8rem' }}>{currentUser?.avatar || '📊'}</span>
+            )}
             <div>
-              <h3 style={{ fontSize: '1.2rem', fontWeight: 800 }}>Statistiques de visionnage</h3>
-              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Profil : {currentUser?.username || 'Utilisateur'}</p>
+              <h3 style={{ fontSize: '1.2rem', fontWeight: 800, margin: 0, color: '#fff' }}>Statistiques de visionnage</h3>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '2px 0 0 0' }}>Profil : {currentUser?.username || 'Utilisateur'}</p>
             </div>
           </div>
           <button className="btn btn-icon btn-secondary" onClick={onClose}>

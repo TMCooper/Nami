@@ -35,6 +35,10 @@ RUN git clone --depth 1 https://github.com/TMCooper/AnimeSamaApi.git /app/AnimeS
 RUN pip install --no-cache-dir -r /app/AnimeSamaApi/requirements.txt || true
 RUN pip install --no-cache-dir -r /app/voiranime_API/requirements.txt || true
 
+# Re-ensure typing_extensions, anyio and FastAPI compatibility (prevents sub-dependency downgrades)
+RUN pip install --no-cache-dir --upgrade "typing-extensions>=4.14.0" "anyio>=4.8.0" "fastapi>=0.100.0"
+
+
 # Copy backend application
 COPY backend /app/backend
 

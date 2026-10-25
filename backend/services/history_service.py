@@ -2,7 +2,7 @@ import os
 import time
 from typing import Optional, List, Dict
 from backend.services.storage import load_json, save_json
-from backend.services.cover_utils import raw_cover_url, is_usable_cover, client_cover_url
+from backend.services.cover_utils import raw_cover_url, is_usable_cover, client_cover_url, normalize_title_key
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
@@ -40,9 +40,21 @@ class HistoryService:
             for title, record in self.get_history(user_id).items()
         }
 
+    @staticmethod
+    def _resolve_title(user_hist: dict, anime_title: str) -> str:
+        """Existing record key for a title variant (accents, case, punctuation): keeps one record per anime."""
+        if anime_title in user_hist:
+            return anime_title
+        wanted = normalize_title_key(anime_title)
+        if wanted:
+            for existing in user_hist:
+                if normalize_title_key(existing) == wanted:
+                    return existing
+        return anime_title
+
     def get_anime_history(self, user_id: str, anime_title: str) -> dict:
         user_hist = self.get_history(user_id)
-        return user_hist.get(anime_title, {"episodes": {}})
+        return user_hist.get(self._resolve_title(user_hist, anime_title), {"episodes": {}})
 
     def save_progress(
         self,
@@ -64,6 +76,7 @@ class HistoryService:
             self.history[uid] = {}
 
         user_hist = self.history[uid]
+        anime_title = self._resolve_title(user_hist, anime_title)
 
         # Placeholders (data: URIs, via.placeholder) must never be stored as a cover
         cover = raw_cover_url(cover) if is_usable_cover(cover) else ""
@@ -113,6 +126,7 @@ class HistoryService:
             self.history[uid] = {}
 
         user_hist = self.history[uid]
+        anime_title = self._resolve_title(user_hist, anime_title)
 
         if anime_title not in user_hist:
             user_hist[anime_title] = {
@@ -146,6 +160,7 @@ class HistoryService:
             self.history[uid] = {}
 
         user_hist = self.history[uid]
+        anime_title = self._resolve_title(user_hist, anime_title)
 
         if anime_title not in user_hist:
             user_hist[anime_title] = {
@@ -243,6 +258,8 @@ class HistoryService:
     def delete_item(self, user_id: str, anime_title: str, ep_key: Optional[str] = None):
         """Removes a specific episode or an entire anime from the user's watch history."""
         uid = user_id or "default"
+        if uid in self.history:
+            anime_title = self._resolve_title(self.history[uid], anime_title)
         if uid in self.history and anime_title in self.history[uid]:
             if ep_key:
                 eps = self.history[uid][anime_title].get("episodes", {})

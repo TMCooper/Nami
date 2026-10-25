@@ -9,15 +9,7 @@ import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
 import StatsModal from './components/StatsModal';
 import AuthModal from './components/AuthModal';
-
-// Same idea as the backend title keys: accents, case, punctuation and VF/VOSTFR tags ignored
-const normalizeTitle = (title) => (title || '')
-  .normalize('NFD').replace(/[̀-ͯ]/g, '')
-  .toLowerCase()
-  .replace(/\((?:vf|vostfr)\)/g, ' ')
-  .replace(/[^a-z0-9]+/g, ' ')
-  .trim()
-  .replace(/\s+(?:vf|vostfr)$/, '');
+import { normalizeTitle, titleKey } from './utils/titles';
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -171,7 +163,8 @@ export default function App() {
   // strict: only an exact (normalized) title match, never "the best search hit".
   const findAnimeByTitle = async (title, { strict = false } = {}) => {
     const wanted = normalizeTitle(title);
-    const sameTitle = (a) => a.title && normalizeTitle(a.title) === wanted;
+    // Entities carry every known name of the anime (other sources, alternative titles)
+    const sameTitle = (a) => [a.title, ...(a.alt_titles || [])].some((t) => t && normalizeTitle(t) === wanted);
     const recentMatch = recentAnimes.find(sameTitle);
     if (recentMatch && recentMatch.url && recentMatch.source) return recentMatch;
 
@@ -237,49 +230,45 @@ export default function App() {
       initialFilePath: item.file_path
     });
 
-    // Background hydrate full season episodes so auto-advance and episode drawer work seamlessly
+    // Background hydrate the season's episodes so auto-advance and the episode drawer work.
+    // The playing episode is never replaced: that would restart its playback.
     try {
-      let animeDetails = null;
       const match = await findAnimeByTitle(item.anime_title);
-      if (match) {
-        const res = await fetch(
-          `/api/details?url=${encodeURIComponent(match.url)}&source=${encodeURIComponent(match.source)}`,
-          { headers: { 'X-User-ID': userId } }
-        );
-        if (res.ok) animeDetails = await res.json();
-      }
+      if (!match?.id) return;
+      const res = await fetch(`/api/anime/${encodeURIComponent(match.id)}`, { headers: { 'X-User-ID': userId } });
+      if (!res.ok) return;
+      const details = await res.json();
 
-      if (animeDetails) {
-        let fullEps = [];
-        if (animeDetails.episodes && animeDetails.episodes.length > 0) {
-          fullEps = animeDetails.episodes;
-        } else if (animeDetails.seasons && animeDetails.seasons.length > 0) {
-          const matchedSeason = animeDetails.seasons.find((s) => s.name === item.season) || animeDetails.seasons[0];
-          const epsRes = await fetch(
-            `/api/episodes?season_url=${encodeURIComponent(matchedSeason.url || matchedSeason.raw_link)}&anime_title=${encodeURIComponent(item.anime_title)}&season_name=${encodeURIComponent(matchedSeason.name)}`
-          );
-          if (epsRes.ok) {
-            const epsData = await epsRes.json();
-            fullEps = epsData.episodes || [];
-          }
-        }
+      // The season variant this record was saved under (its history keys), from the record's source
+      const wanted = titleKey(item.anime_title);
+      const fromVoirAnime = (item.embed_url || '').includes('voir-anime');
+      let found = null;
+      (details.seasons || []).forEach((season) => {
+        (season.variants || []).forEach((variant) => {
+          if (variant.version === 'scans') return;
+          const savedHere = (variant.history_keys || []).some((k) => titleKey(k.title) === wanted && k.season === item.season);
+          if (savedHere && (!found || (variant.source === 'voiranime') === fromVoirAnime)) found = { season, variant };
+        });
+      });
+      if (!found) return;
 
-        if (fullEps && fullEps.length > 0) {
-          setActivePlayer((prev) => {
-            if (!prev || prev.animeTitle !== item.anime_title) return prev;
-            const matchedEp = fullEps.find((e) => String(e.num) === String(item.episode_num)) || prev.episode;
-            return {
-              ...prev,
-              episode: { ...matchedEp, file_path: prev.episode?.file_path || matchedEp.file_path },
-              episodes: fullEps
-            };
-          });
-        }
+      const params = new URLSearchParams({ season: found.season.key, source: found.variant.source, version: found.variant.version });
+      const epsRes = await fetch(`/api/anime/${encodeURIComponent(details.id)}/episodes?${params}`);
+      if (!epsRes.ok) return;
+      const fullEps = (await epsRes.json()).episodes || [];
+      if (fullEps.length > 0) {
+        setActivePlayer((prev) => (
+          prev && prev.animeTitle === item.anime_title && prev.season === item.season ? { ...prev, episodes: fullEps } : prev
+        ));
       }
     } catch (e) {
       console.warn("Could not background hydrate episodes for resume:", e);
     }
   };
+
+  // Other players of an episode, tried by the download when the first one has no direct stream
+  const fallbackUrls = (episode, primary) =>
+    (episode.players || []).map((p) => p.embed_url).filter((url) => url && url !== primary);
 
   const handleDownloadEpisode = (animeTitle, season, episode) => {
     const embedUrl = episode.embed_url || episode.url;
@@ -298,7 +287,8 @@ export default function App() {
             season: season,
             episode_num: String(episode.num || episode.title || '1'),
             stream_url: streamUrl,
-            stream_type: streamType
+            stream_type: streamType,
+            fallback_urls: data.stream_url ? [] : fallbackUrls(episode, embedUrl)
           })
         });
       })
@@ -310,7 +300,8 @@ export default function App() {
     const payloadEpisodes = episodesList.map((ep) => ({
       episode_num: String(ep.num || ep.title || '1'),
       stream_url: ep.embed_url || ep.url,
-      stream_type: 'm3u8'
+      stream_type: 'm3u8',
+      fallback_urls: fallbackUrls(ep, ep.embed_url || ep.url)
     }));
 
     fetch('/api/downloads/bulk', {

@@ -53,7 +53,7 @@ class UpdateService:
         return "Inconnu"
 
     def _get_yoitsu_versions(self) -> tuple[str, str]:
-        local_ver = "0.1.6"
+        local_ver = "0.1.7"
         try:
             local_ver = importlib.metadata.version("YoitsuWrap")
         except Exception:

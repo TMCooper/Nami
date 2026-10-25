@@ -2,7 +2,7 @@ import os
 import json
 import time
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 _locks: dict = {}
 _locks_guard = threading.Lock()
@@ -48,14 +48,18 @@ def load_json(path: str, default: Callable[[], Any]) -> Any:
         return default()
 
 
-def save_json(path: str, data: Any, indent: int = 2):
-    """Writes a JSON store atomically (temp file + os.replace), keeping the previous version as .bak."""
+def save_json(path: str, data: Any, indent: Optional[int] = 2):
+    """Writes a JSON store atomically (temp file + os.replace), keeping the previous version as .bak.
+
+    indent=None uses the C encoder (much faster for large stores).
+    """
+    text = json.dumps(data, indent=indent, ensure_ascii=False)
     with _lock_for(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=indent, ensure_ascii=False)
+                f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             if os.path.exists(path):

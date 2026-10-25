@@ -15,11 +15,12 @@ from urllib.parse import unquote
 
 from backend.services.catalog_service import catalog_service
 from backend.services.settings_service import settings_service
-from backend.services.download_service import download_service, sanitize_filename
+from backend.services.download_service import download_service, sanitize_filename, resolve_anime_folder
 from backend.services.history_service import history_service
 from backend.services.user_service import user_service
 from backend.services.cache_service import cache_service
 from backend.services.yoitsu_service import yoitsu_service
+from backend.yoitsu.gateway import yoitsu_gateway
 from backend.services.net_safety import resolve_media_path, media_root
 
 SCANS_TIMEOUT = 120.0
@@ -55,6 +56,7 @@ class DownloadCreate(BaseModel):
     episode_num: str
     stream_url: str
     stream_type: Optional[str] = "m3u8"
+    fallback_urls: Optional[List[str]] = None
 
 class BulkDownloadCreate(BaseModel):
     anime_title: str
@@ -193,18 +195,19 @@ async def search_anime(
     q: str = Query("", description="Recherche d'anime"),
     source: str = Query("all", description="Source: 'all', 'anime_sama', 'voiranime'")
 ):
-    results = await catalog_service.search(query=q, source=source)
+    # One entity per anime (sources merged), see backend/yoitsu
+    results = await yoitsu_gateway.search(query=q, source=source)
     return {"total": len(results), "results": results}
 
 @router.get("/catalog/random")
 async def get_random_catalog(count: int = Query(12, ge=1, le=50)):
-    random_animes = cache_service.get_random_animes(count=count)
+    random_animes = await yoitsu_gateway.random(count=count)
     return {"total": len(random_animes), "results": random_animes}
 
 @router.get("/catalog/recent")
 async def get_recent_animes(x_user_id: Optional[str] = Header("default")):
     uid = x_user_id or "default"
-    recents = cache_service.get_recent_animes(user_id=uid)
+    recents = yoitsu_gateway.recents(user_id=uid)
     if cache_service.recents_missing_cover(uid):
         # Never resolve covers inside the request: they appear on the next load
         catalog_service._spawn(catalog_service.repair_recent_covers(uid))
@@ -217,6 +220,51 @@ async def get_catalog_status():
 @router.post("/catalog/update")
 async def trigger_catalog_update(source: str = Query("all", description="'all', 'anime_sama' ou 'voiranime'")):
     return await catalog_service.trigger_update(source=source)
+
+# --- Merged anime entities (Yoitsu layer) ---
+@router.get("/anime/lookup")
+async def lookup_anime(
+    source: str = Query(..., description="Source ('anime_sama' ou 'voiranime')"),
+    url: str = Query(..., description="URL de l'entrée sur la source"),
+    title: str = Query(..., description="Titre de l'entrée")
+):
+    if not yoitsu_gateway.valid_entry(source, url):
+        raise HTTPException(status_code=400, detail="Source ou URL invalide.")
+    entity = await yoitsu_gateway.lookup(source=source, url=url, title=title)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Anime introuvable.")
+    return entity
+
+@router.get("/anime/{entity_id}")
+async def get_anime_entity(
+    entity_id: str,
+    refresh: bool = Query(False, description="Forcer l'invalidation du cache"),
+    x_user_id: Optional[str] = Header("default")
+):
+    details = await yoitsu_gateway.details(entity_id, refresh=refresh, user_id=x_user_id or "default")
+    if not details:
+        raise HTTPException(status_code=404, detail="Anime introuvable.")
+    return details
+
+@router.get("/anime/{entity_id}/episodes")
+async def get_anime_entity_episodes(
+    entity_id: str,
+    season: str = Query(..., description="Clé de saison (ex: saison-1)"),
+    source: str = Query("", description="Source préférée"),
+    version: str = Query("vostfr", description="Version (vostfr ou vf)"),
+    refresh: bool = Query(False, description="Forcer l'invalidation du cache")
+):
+    result = await yoitsu_gateway.episodes(entity_id, season=season, source=source, version=version, refresh=refresh)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Saison introuvable.")
+    return {**result, "total": len(result["episodes"])}
+
+@router.get("/episode/players")
+async def get_episode_players(url: str = Query(..., description="Page d'épisode VoirAnime")):
+    if not yoitsu_gateway.valid_entry("voiranime", url):
+        raise HTTPException(status_code=400, detail="URL VoirAnime invalide.")
+    players = await yoitsu_gateway.players(url)
+    return {"total": len(players), "players": players}
 
 @router.get("/details")
 async def get_details(
@@ -425,9 +473,10 @@ async def check_episodes_downloaded(
     season: str = Query("Saison 1")
 ):
     root_folder = settings_service.get_root_folder()
-    safe_anime = sanitize_filename(anime_title)
+    anime_base = os.path.join(root_folder, "nami", "anime")
+    safe_anime = resolve_anime_folder(anime_base, anime_title)
     safe_season = sanitize_filename(season)
-    season_dir = os.path.join(root_folder, "nami", "anime", safe_anime, safe_season)
+    season_dir = os.path.join(anime_base, safe_anime, safe_season)
 
     status_map = {}
     if os.path.exists(season_dir):
@@ -591,7 +640,8 @@ async def add_download(payload: DownloadCreate):
         season=payload.season,
         episode_num=payload.episode_num,
         stream_url=payload.stream_url,
-        stream_type=payload.stream_type or "m3u8"
+        stream_type=payload.stream_type or "m3u8",
+        fallback_urls=(payload.fallback_urls or [])[:10]
     )
     return task.to_dict()
 
@@ -604,7 +654,8 @@ async def add_bulk_download(payload: BulkDownloadCreate):
             season=payload.season,
             episode_num=ep.get("episode_num", "1"),
             stream_url=ep.get("stream_url", ""),
-            stream_type=ep.get("stream_type", "m3u8")
+            stream_type=ep.get("stream_type", "m3u8"),
+            fallback_urls=[u for u in ep.get("fallback_urls") or [] if isinstance(u, str)][:10]
         )
         added_tasks.append(t.to_dict())
     return {"total_added": len(added_tasks), "tasks": added_tasks}

@@ -1,7 +1,13 @@
 import React from 'react';
 import { Play, RotateCcw, Shuffle, Sparkles, Clock, History, Film } from 'lucide-react';
 
-import { DEFAULT_ANIME_COVER } from '../utils/placeholders';
+import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
+
+const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
+
+// Merged entities list every source that has the anime
+const hasSource = (anime, source) =>
+  anime.source === source || (anime.sources || []).some((s) => s.source === source);
 
 export { DEFAULT_ANIME_COVER };
 
@@ -32,17 +38,17 @@ export default function CatalogGrid({
 
   const filteredRecentAnimes = (recentAnimes || []).filter((anime) => {
     if (activeSource === 'all') return true;
-    return anime.source === activeSource;
+    return hasSource(anime, activeSource);
   });
 
   const filteredRandomSuggestions = (randomSuggestions || []).filter((anime) => {
     if (activeSource === 'all') return true;
-    return anime.source === activeSource;
+    return hasSource(anime, activeSource);
   });
 
   const filteredResults = (results || []).filter((anime) => {
     if (activeSource === 'all') return true;
-    return anime.source === activeSource;
+    return hasSource(anime, activeSource);
   });
 
   if (isLoading) {
@@ -147,7 +153,7 @@ export default function CatalogGrid({
           }}>
             {filteredRecentAnimes.slice(0, 6).map((anime, idx) => (
               <div
-                key={idx}
+                key={anime.id || idx}
                 className="surface-card animate-fade-in"
                 onClick={() => onSelectAnime(anime)}
                 style={{
@@ -166,7 +172,7 @@ export default function CatalogGrid({
                     loading="lazy"
                     decoding="async"
                     alt={anime.title}
-                    onError={(e) => { e.target.src = DEFAULT_ANIME_COVER; }}
+                    onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                 </div>
@@ -207,7 +213,7 @@ export default function CatalogGrid({
           }}>
             {filteredRandomSuggestions.slice(0, 6).map((anime, idx) => (
               <div
-                key={idx}
+                key={anime.id || idx}
                 className="surface-card animate-fade-in"
                 onClick={() => onSelectAnime(anime)}
                 style={{
@@ -226,7 +232,7 @@ export default function CatalogGrid({
                     loading="lazy"
                     decoding="async"
                     alt={anime.title}
-                    onError={(e) => { e.target.src = DEFAULT_ANIME_COVER; }}
+                    onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                 </div>
@@ -273,7 +279,6 @@ export default function CatalogGrid({
             gap: '16px'
           }}>
             {filteredResults.map((anime, index) => {
-              const isAnimeSama = anime.source === 'anime_sama';
               return (
                 <div
                   key={anime.id || index}
@@ -304,9 +309,7 @@ export default function CatalogGrid({
                     loading="lazy"
                     decoding="async"
                       alt={anime.title}
-                      onError={(e) => {
-                        e.target.src = DEFAULT_ANIME_COVER;
-                      }}
+                      onError={imageFallback(anime.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                       style={{
                         width: '100%',
                         height: '100%',
@@ -317,10 +320,12 @@ export default function CatalogGrid({
                       onMouseLeave={(e) => e.target.style.transform = 'scale(1)'}
                     />
 
-                    <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5 }}>
-                      <span className={`badge ${isAnimeSama ? 'badge-anime-sama' : 'badge-voiranime'}`}>
-                        {isAnimeSama ? 'Anime-Sama' : 'VoirAnime'}
-                      </span>
+                    <div style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 5, display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                      {(anime.sources?.length ? anime.sources : [{ source: anime.source }]).map((s) => (
+                        <span key={s.source} className={`badge ${s.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`}>
+                          {SOURCE_LABELS[s.source] || s.source}
+                        </span>
+                      ))}
                     </div>
 
                     <div

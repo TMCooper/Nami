@@ -19,13 +19,38 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     return name.strip().replace(" ", "_")
 
+
+def resolve_anime_folder(base_dir: str, anime_title: str) -> str:
+    """Folder name of an anime under base_dir: an existing folder of the same title variant
+    ("Re:Zero" vs "Re Zero") is reused so downloads of one anime stay together."""
+    candidate = sanitize_filename(anime_title)
+    if os.path.isdir(os.path.join(base_dir, candidate)):
+        return candidate
+    from backend.services.cover_utils import normalize_title_key
+    # Compared without spaces: sanitize_filename drops ':' without a space ("Re:Zero" -> "ReZero")
+    wanted = normalize_title_key(anime_title).replace(" ", "")
+    try:
+        for folder in os.listdir(base_dir):
+            if normalize_title_key(folder).replace(" ", "") == wanted and os.path.isdir(os.path.join(base_dir, folder)):
+                return folder
+    except OSError:
+        pass
+    return candidate
+
+def _needs_resolution(url: str) -> bool:
+    return "voir-anime.to" in url or ("http" in url and not any(ext in url for ext in [".m3u8", ".mp4", ".ts"]))
+
+
 class DownloadTask:
-    def __init__(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8", custom_filename: str = None):
+    def __init__(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8", custom_filename: str = None,
+                 fallback_urls: Optional[List[str]] = None):
         self.id = str(uuid.uuid4())
         self.anime_title = anime_title
         self.season = season or "Saison_1"
         self.episode_num = str(episode_num)
         self.stream_url = stream_url
+        # Other players of the episode, tried in order when stream_url does not resolve
+        self.fallback_urls = [u for u in (fallback_urls or []) if isinstance(u, str) and u and u != stream_url]
         self.stream_type = stream_type.lower()
         self.custom_filename = custom_filename
         self.status = "queued"  # queued, downloading, completed, error, cancelled
@@ -43,6 +68,7 @@ class DownloadTask:
             "episode_num": self.episode_num,
             "stream_url": self.stream_url,
             "stream_type": self.stream_type,
+            "fallback_urls": self.fallback_urls,
             "status": self.status,
             "progress": round(self.progress, 1),
             "speed": self.speed,
@@ -98,7 +124,8 @@ class DownloadService:
                             season=item["season"],
                             episode_num=item["episode_num"],
                             stream_url=item["stream_url"],
-                            stream_type=item.get("stream_type", "m3u8")
+                            stream_type=item.get("stream_type", "m3u8"),
+                            fallback_urls=item.get("fallback_urls")
                         )
                         t.id = item["id"]
                         t.status = item["status"] if item["status"] != "downloading" else "error"
@@ -119,13 +146,15 @@ class DownloadService:
         except Exception as e:
             print(f"[DownloadService] Error saving tasks DB: {e}")
 
-    def add_task(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8") -> DownloadTask:
+    def add_task(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8",
+                 fallback_urls: Optional[List[str]] = None) -> DownloadTask:
         task = DownloadTask(
             anime_title=anime_title,
             season=season,
             episode_num=episode_num,
             stream_url=stream_url,
-            stream_type=stream_type
+            stream_type=stream_type,
+            fallback_urls=fallback_urls
         )
         self.tasks[task.id] = task
         self._save_tasks()
@@ -161,7 +190,7 @@ class DownloadService:
         try:
             root_folder = settings_service.get_root_folder()
             norm_anime, norm_season = normalize_anime_and_season(task.anime_title, task.season)
-            safe_anime = sanitize_filename(norm_anime)
+            safe_anime = resolve_anime_folder(os.path.join(root_folder, "nami", "anime"), norm_anime)
             safe_season = sanitize_filename(norm_season)
 
             # Auto-save anime cover.jpg if missing
@@ -188,16 +217,22 @@ class DownloadService:
                 clean_ep_num = "01"
             ep_name = f"Episode_{clean_ep_num}.mp4"
 
-            # Auto-resolve stream if it's a page or embed link
-            if "voir-anime.to" in task.stream_url or ("http" in task.stream_url and not any(ext in task.stream_url for ext in [".m3u8", ".mp4", ".ts"])):
-                try:
-                    from backend.services.catalog_service import catalog_service
-                    resolved = await catalog_service.resolve_stream(task.stream_url)
+            # Auto-resolve stream if it's a page or embed link (then the episode's other players)
+            if _needs_resolution(task.stream_url):
+                from backend.services.catalog_service import catalog_service
+                for candidate in [task.stream_url, *task.fallback_urls]:
+                    if not _needs_resolution(candidate):
+                        task.stream_url = candidate
+                        break
+                    try:
+                        resolved = await catalog_service.resolve_stream(candidate)
+                    except Exception as e:
+                        print(f"[DownloadService] Stream pre-resolution error ({candidate}): {e}")
+                        continue
                     if resolved and resolved.get("stream_url"):
                         task.stream_url = resolved["stream_url"]
                         task.stream_type = resolved.get("stream_type", "m3u8")
-                except Exception as e:
-                    print(f"[DownloadService] Stream pre-resolution error: {e}")
+                        break
 
             # Create output directory structure: root/nami/anime/{anime_title}/{season}/{ep_name}
             output_dir = os.path.join(anime_dir, safe_season)

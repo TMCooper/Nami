@@ -149,7 +149,10 @@ async def _warm_up():
     for name, ready in zip(names, results):
         api_state.api_ready[name] = ready
     from backend.services.yoitsu_service import yoitsu_service
+    from backend.yoitsu.gateway import yoitsu_gateway
     await asyncio.to_thread(yoitsu_service.get_config)
+    # A request may have tried before the APIs were up: reload now instead of after the retry delay
+    yoitsu_gateway.ensure_catalog(force=True)
 
 
 @asynccontextmanager
@@ -163,8 +166,10 @@ async def lifespan(app: FastAPI):
     warm_up_task.cancel()
     from backend.services.image_service import image_service
     from backend.routers.stream_proxy import close_stream_client
+    from backend.yoitsu.gateway import yoitsu_gateway
     await image_service.close()
     await close_stream_client()
+    await yoitsu_gateway.close()
     for name in list(_submodule_processes):
         _stop_submodule(name)
 

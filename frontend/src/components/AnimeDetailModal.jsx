@@ -1,7 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, HardDrive, BookOpen } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
-import { DEFAULT_ANIME_COVER } from '../utils/placeholders';
+import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
+import { findHistoryEntries } from '../utils/titles';
+
+const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
+const VERSION_LABELS = { vostfr: 'VOSTFR', vf: 'VF' };
 
 export default function AnimeDetailModal({
   currentUser,
@@ -13,7 +17,9 @@ export default function AnimeDetailModal({
 }) {
   const [details, setDetails] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedSeason, setSelectedSeason] = useState(null);
+  const [loadError, setLoadError] = useState('');
+  const [selectedSeasonKey, setSelectedSeasonKey] = useState(null);
+  const [activeVariant, setActiveVariant] = useState(null); // source + version actually served
   const [episodes, setEpisodes] = useState([]);
   const [isLoadingEpisodes, setIsLoadingEpisodes] = useState(false);
   const [history, setHistory] = useState({});
@@ -21,57 +27,90 @@ export default function AnimeDetailModal({
   const [downloadedScans, setDownloadedScans] = useState({}); // { "1": { downloaded: true } }
   const [readingChapter, setReadingChapter] = useState(null);
   const [downloadingScan, setDownloadingScan] = useState(null);
+  const [synopsisOpen, setSynopsisOpen] = useState(false);
 
   const userId = currentUser?.id || 'default';
 
-  // Fetch anime details & watch history for current user
-  const loadAnimeDetails = (forceRefresh = false) => {
-    if (!anime) return;
-    setIsLoading(true);
-
-    fetch('/api/history', {
-      headers: { 'X-User-ID': userId }
-    })
+  const refreshHistory = () =>
+    fetch('/api/history', { headers: { 'X-User-ID': userId } })
       .then((res) => res.json())
       .then((data) => setHistory(data || {}))
       .catch(() => {});
 
-    fetch(`/api/details?url=${encodeURIComponent(anime.url)}&source=${anime.source}&refresh=${forceRefresh}`, {
-      headers: { 'X-User-ID': userId }
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setDetails(data);
-        if (data.seasons && data.seasons.length > 0) {
-          const firstSeason = data.seasons[0];
-          setSelectedSeason(firstSeason);
-          loadSeasonEpisodes(firstSeason.url, firstSeason.name, forceRefresh);
-        } else if (data.episodes) {
-          setEpisodes(data.episodes);
-          checkDownloadedStatus(data.title || anime.title, "Saison 1");
-        }
-      })
-      .catch((err) => console.error("Error loading details:", err))
-      .finally(() => setIsLoading(false));
+  // Entity id of the clicked card; history/legacy links only know source + url + title
+  const lookupEntityId = async () => {
+    if (!anime?.url || !anime?.title) return null;
+    const params = new URLSearchParams({ source: anime.source || 'anime_sama', url: anime.url, title: anime.title });
+    const res = await fetch(`/api/anime/lookup?${params}`);
+    if (!res.ok) return null;
+    return (await res.json()).id;
+  };
+
+  const fetchEntity = (entityId, forceRefresh) =>
+    fetch(`/api/anime/${encodeURIComponent(entityId)}?refresh=${forceRefresh}`, { headers: { 'X-User-ID': userId } });
+
+  const loadAnimeDetails = async (forceRefresh = false) => {
+    if (!anime) return;
+    setIsLoading(true);
+    setLoadError('');
+    refreshHistory();
+    try {
+      const cardId = anime.id && String(anime.id).startsWith('a-') ? anime.id : null;
+      let res = cardId ? await fetchEntity(cardId, forceRefresh) : null;
+      if (!res || res.status === 404) {
+        // Ids of old cards can change when two entries are merged: find the entity again from its source entry
+        const entityId = await lookupEntityId();
+        if (!entityId) throw new Error('not found');
+        res = await fetchEntity(entityId, forceRefresh);
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDetails(data);
+      const firstSeason = data.seasons?.find((s) => !s.is_scans) || data.seasons?.[0];
+      if (firstSeason) {
+        selectSeason(data, firstSeason, anime.source, 'vostfr', forceRefresh);
+      } else {
+        setEpisodes([]);
+      }
+    } catch (err) {
+      console.error("Error loading details:", err);
+      setLoadError("Impossible de charger cet anime.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
     loadAnimeDetails(false);
   }, [anime, userId]);
 
-  const loadSeasonEpisodes = (seasonUrl, seasonName = 'Saison 1', forceRefresh = false) => {
+  const selectSeason = (data, season, source, version, forceRefresh = false) => {
+    setSelectedSeasonKey(season.key);
     setIsLoadingEpisodes(true);
-    const targetTitle = details?.title || anime?.title || '';
-    fetch(`/api/episodes?season_url=${encodeURIComponent(seasonUrl)}&anime_title=${encodeURIComponent(targetTitle)}&season_name=${encodeURIComponent(seasonName)}&refresh=${forceRefresh}`)
+    setEpisodes([]);
+
+    if (season.is_scans) {
+      // Manga scans keep using YoitsuWrap Scan objects through /api/episodes
+      const variant = season.variants.find((v) => v.version === 'scans') || season.variants[0];
+      setActiveVariant(variant);
+      fetch(`/api/episodes?season_url=${encodeURIComponent(variant.url)}&anime_title=${encodeURIComponent(variant.history_title)}&season_name=Scans&refresh=${forceRefresh}`)
+        .then((res) => res.json())
+        .then((res) => {
+          setEpisodes(res.episodes || []);
+          checkScansStatus(variant.history_title);
+        })
+        .catch((err) => console.error("Error loading scans:", err))
+        .finally(() => setIsLoadingEpisodes(false));
+      return;
+    }
+
+    const params = new URLSearchParams({ season: season.key, source: source || '', version: version || 'vostfr', refresh: String(forceRefresh) });
+    fetch(`/api/anime/${encodeURIComponent(data.id)}/episodes?${params}`)
       .then((res) => res.json())
-      .then((data) => {
-        const eps = data.episodes || [];
-        setEpisodes(eps);
-        if (seasonName.toLowerCase() === 'scans' || data.is_scans) {
-          checkScansStatus(targetTitle);
-        } else {
-          checkDownloadedStatus(targetTitle, seasonName);
-        }
+      .then((res) => {
+        setEpisodes(res.episodes || []);
+        setActiveVariant(res.variant || null);
+        if (res.variant) checkDownloadedStatus(res.variant.history_title, res.variant.season_name);
       })
       .catch((err) => console.error("Error loading episodes:", err))
       .finally(() => setIsLoadingEpisodes(false));
@@ -93,17 +132,24 @@ export default function AnimeDetailModal({
       .catch(() => {});
   };
 
+  // Titles under which progress/downloads of the active variant are stored (legacy keys included)
+  const historyTitle = activeVariant?.history_title || details?.title || anime?.title || '';
+  const currentSeasonName = activeVariant?.season_name || 'Saison 1';
+  const historyEntries = useMemo(
+    () => findHistoryEntries(history, activeVariant?.history_keys || [{ title: historyTitle, season: currentSeasonName }]),
+    [history, activeVariant, historyTitle, currentSeasonName]
+  );
+
   const handleDownloadChapter = (chapNum) => {
-    const title = details?.title || anime?.title;
     setDownloadingScan(chapNum);
     fetch('/api/scans/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anime_title: title, chapter_num: Number(chapNum) })
+      body: JSON.stringify({ anime_title: historyTitle, chapter_num: Number(chapNum) })
     })
       .then((res) => res.json())
       .then(() => {
-        checkScansStatus(title);
+        checkScansStatus(historyTitle);
         setDownloadingScan(null);
       })
       .catch((err) => {
@@ -113,16 +159,15 @@ export default function AnimeDetailModal({
   };
 
   const handleDownloadAllScans = () => {
-    const title = details?.title || anime?.title;
     setDownloadingScan('all');
     fetch('/api/scans/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anime_title: title })
+      body: JSON.stringify({ anime_title: historyTitle })
     })
       .then((res) => res.json())
       .then(() => {
-        checkScansStatus(title);
+        checkScansStatus(historyTitle);
         setDownloadingScan(null);
       })
       .catch((err) => {
@@ -131,47 +176,35 @@ export default function AnimeDetailModal({
       });
   };
 
-  const handleSeasonChange = (season) => {
-    setSelectedSeason(season);
-    loadSeasonEpisodes(season.url, season.name, false);
-  };
+  // Watched under any of the variant's keys (e.g. before the merge, under the VoirAnime post's own title)
+  const watchedEntries = (epNum) =>
+    historyEntries.filter(({ season, record }) => record.episodes?.[`${season}:${epNum}`]?.watched);
+  const isEpisodeWatched = (epNum) => watchedEntries(epNum).length > 0;
 
-  const isEpisodeWatched = (seasonName, epNum) => {
-    const animeRecord = history[details?.title || anime?.title];
-    if (!animeRecord || !animeRecord.episodes) return false;
-    const epKey = `${seasonName}:${epNum}`;
-    return animeRecord.episodes[epKey]?.watched || false;
-  };
-
-  const toggleEpisodeWatched = (seasonName, epNum, e) => {
-    e.stopPropagation();
-    const title = details?.title || anime?.title;
+  const setWatched = (title, season, epNum, watched) =>
     fetch('/api/history/toggle-watched', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-User-ID': userId
       },
-      body: JSON.stringify({
-        user_id: userId,
-        anime_title: title,
-        season: seasonName,
-        ep_id: String(epNum)
-      })
-    })
-      .then((res) => res.json())
-      .then(() => {
-        return fetch('/api/history', { headers: { 'X-User-ID': userId } }).then((res) => res.json());
-      })
-      .then((data) => setHistory(data || {}))
+      body: JSON.stringify({ user_id: userId, anime_title: title, season, ep_id: String(epNum), watched })
+    });
+
+  const toggleEpisodeWatched = (epNum, e) => {
+    e.stopPropagation();
+    const watchedIn = watchedEntries(epNum);
+    // Unwatching clears every record that marks it; watching writes under the current key
+    const requests = watchedIn.length
+      ? watchedIn.map(({ title, season }) => setWatched(title, season, epNum, false))
+      : [setWatched(historyTitle, currentSeasonName, epNum, true)];
+    Promise.all(requests)
+      .then(() => refreshHistory())
       .catch((err) => console.error("Error toggling watched:", err));
   };
 
   const handleMarkSeasonWatched = () => {
-    const title = details?.title || anime?.title;
-    const sName = selectedSeason?.name || 'Saison 1';
     const epIds = episodes.map((ep) => String(ep.num || ep.title || '1'));
-
     fetch('/api/history/mark-season', {
       method: 'POST',
       headers: {
@@ -180,24 +213,40 @@ export default function AnimeDetailModal({
       },
       body: JSON.stringify({
         user_id: userId,
-        anime_title: title,
-        season: sName,
+        anime_title: historyTitle,
+        season: currentSeasonName,
         ep_ids: epIds,
         watched: true
       })
     })
-      .then(() => fetch('/api/history', { headers: { 'X-User-ID': userId } }).then((res) => res.json()))
-      .then((data) => setHistory(data || {}))
+      .then(() => refreshHistory())
       .catch((err) => console.error("Error marking season:", err));
   };
 
   if (!anime) return null;
 
-  const currentSeasonName = selectedSeason?.name || 'Saison 1';
+  const selectedSeason = details?.seasons?.find((s) => s.key === selectedSeasonKey) || null;
+  const seasonVariants = selectedSeason?.variants || [];
+  const seasonSources = [...new Set(seasonVariants.filter((v) => v.version !== 'scans').map((v) => v.source))];
+  const versionOptions = ['vostfr', 'vf'].map((version) => {
+    const candidates = seasonVariants.filter((v) => v.version === version);
+    // Same source when it has this version, else a source known to have it, else an unverified one
+    const preferred = candidates.find((v) => v.source === activeVariant?.source && v.available !== false)
+      || candidates.find((v) => v.available === true)
+      || candidates.find((v) => v.available !== false)
+      || candidates[0];
+    return { version, variant: preferred, available: candidates.some((v) => v.available !== false) };
+  });
+  const sourcesForVersion = seasonSources.filter((src) =>
+    seasonVariants.some((v) => v.source === src && v.version === (activeVariant?.version || 'vostfr') && v.available !== false)
+  );
+
   const animeTitle = details?.title || anime.title;
   // Real cover only: the placeholder must never be sent to the history as a cover
   const animeCover = details?.cover || anime.cover || '';
-  const isScanMode = currentSeasonName?.toLowerCase() === 'scans' || (episodes.length > 0 && episodes[0]?.is_scan);
+  const isScanMode = Boolean(selectedSeason?.is_scans) || (episodes.length > 0 && episodes[0]?.is_scan);
+  const synopsis = details?.synopsis;
+  const allSources = details?.sources?.length ? details.sources : [{ source: anime.source }];
 
   return (
     <>
@@ -247,16 +296,25 @@ export default function AnimeDetailModal({
               <Loader2 className="animate-spin" size={28} color="var(--primary)" />
               <span>Chargement des informations de l'anime...</span>
             </div>
+          ) : loadError ? (
+            <div style={{ padding: '80px', textAlign: 'center', color: 'var(--text-muted)' }}>{loadError}</div>
           ) : (
-            <div style={{ overflowY: 'auto', padding: '24px' }}>
+            <div style={{ overflowY: 'auto' }}>
+              {details?.banner && (
+                <div style={{
+                  height: '120px',
+                  backgroundImage: `linear-gradient(to bottom, rgba(22,27,34,0.1), var(--bg-surface)), url("${details.banner}")`,
+                  backgroundSize: 'cover',
+                  backgroundPosition: 'center'
+                }} />
+              )}
+              <div style={{ padding: '24px', paddingTop: details?.banner ? '0' : '24px' }}>
               {/* Header Info */}
               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
                 <img
                   src={animeCover || DEFAULT_ANIME_COVER}
                   alt={animeTitle}
-                  onError={(e) => {
-                    e.target.src = DEFAULT_ANIME_COVER;
-                  }}
+                  onError={imageFallback(details?.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
                   style={{
                     width: '160px',
                     height: '230px',
@@ -266,10 +324,12 @@ export default function AnimeDetailModal({
                   }}
                 />
                 <div style={{ flex: 1, minWidth: '260px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className={`badge ${anime.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`}>
-                      {anime.source === 'anime_sama' ? 'Anime-Sama' : 'VoirAnime'}
-                    </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    {allSources.map((s) => (
+                      <span key={s.source} className={`badge ${s.source === 'anime_sama' ? 'badge-anime-sama' : 'badge-voiranime'}`}>
+                        {SOURCE_LABELS[s.source] || s.source}
+                      </span>
+                    ))}
                     <button
                       className="btn btn-secondary"
                       style={{ fontSize: '0.72rem', padding: '2px 8px' }}
@@ -280,26 +340,99 @@ export default function AnimeDetailModal({
                     </button>
                   </div>
 
-                  <h2 style={{ fontSize: '1.6rem', fontWeight: 800 }}>{animeTitle}</h2>
-                  {details?.synopsis && (
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', lineHeight: '1.5', maxHeight: '90px', overflowY: 'auto' }}>
-                      {details.synopsis}
-                    </p>
+                  <div>
+                    <h2 style={{ fontSize: '1.6rem', fontWeight: 800 }}>{animeTitle}</h2>
+                    {details?.alt_titles?.length > 0 && (
+                      <p style={{ color: 'var(--text-dim)', fontSize: '0.78rem', marginTop: '2px' }} title={details.alt_titles.join(' · ')}>
+                        {details.alt_titles.slice(0, 3).join(' · ')}
+                      </p>
+                    )}
+                  </div>
+
+                  {details?.genres?.length > 0 && (
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      {details.genres.slice(0, 6).map((g) => (
+                        <span key={g} className="badge" style={{ background: 'rgba(240,246,252,0.06)', color: 'var(--text-muted)' }}>{g}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {synopsis?.text && (
+                    <div>
+                      <p style={{
+                        color: 'var(--text-muted)',
+                        fontSize: '0.88rem',
+                        lineHeight: '1.55',
+                        whiteSpace: 'pre-line',
+                        ...(synopsisOpen ? {} : { display: '-webkit-box', WebkitLineClamp: 4, WebkitBoxOrient: 'vertical', overflow: 'hidden' })
+                      }}>
+                        {synopsis.lang === 'en' && (
+                          <span className="badge" style={{ marginRight: '6px', fontSize: '0.65rem' }} title="Synopsis en anglais (AniList)">EN</span>
+                        )}
+                        {synopsis.text}
+                      </p>
+                      {synopsis.text.length > 280 && (
+                        <button
+                          className="btn btn-ghost"
+                          style={{ fontSize: '0.75rem', padding: '2px 8px', marginTop: '4px' }}
+                          onClick={() => setSynopsisOpen((open) => !open)}
+                        >
+                          {synopsisOpen ? 'Réduire' : 'Lire la suite'}
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   {/* Season Pills */}
-                  {details?.seasons && details.seasons.length > 0 && (
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
-                      {details.seasons.map((s, idx) => (
+                  {details?.seasons?.length > 0 && (
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '4px' }}>
+                      {details.seasons.map((s) => (
                         <button
-                          key={idx}
-                          className={`btn ${selectedSeason?.name === s.name ? 'btn-primary' : 'btn-secondary'}`}
+                          key={s.key}
+                          className={`btn ${selectedSeasonKey === s.key ? 'btn-primary' : 'btn-secondary'}`}
                           style={{ padding: '4px 12px', fontSize: '0.8rem' }}
-                          onClick={() => handleSeasonChange(s)}
+                          onClick={() => selectSeason(details, s, activeVariant?.source, activeVariant?.version || 'vostfr')}
                         >
-                          {s.name}
+                          {s.label}
                         </button>
                       ))}
+                    </div>
+                  )}
+
+                  {/* Version & source selectors of the selected season */}
+                  {selectedSeason && !isScanMode && (
+                    <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Version</span>
+                        {versionOptions.map(({ version, variant, available }) => (
+                          <button
+                            key={version}
+                            className={`btn ${activeVariant?.version === version ? 'btn-primary' : 'btn-secondary'}`}
+                            style={{ padding: '3px 10px', fontSize: '0.75rem', opacity: available ? 1 : 0.4 }}
+                            disabled={!variant || !available}
+                            title={!variant || !available ? 'Version indisponible' : variant.available === null ? 'Disponibilité non vérifiée' : ''}
+                            onClick={() => selectSeason(details, selectedSeason, variant.source, version)}
+                          >
+                            {VERSION_LABELS[version]}{variant && variant.available === null ? ' ?' : ''}
+                          </button>
+                        ))}
+                      </div>
+                      {(sourcesForVersion.length > 1
+                        || (sourcesForVersion.length > 0 && !sourcesForVersion.includes(activeVariant?.source))) && (
+                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Source</span>
+                          {sourcesForVersion.map((src) => (
+                            <button
+                              key={src}
+                              className={`btn ${activeVariant?.source === src ? 'btn-primary' : 'btn-secondary'}`}
+                              style={{ padding: '3px 10px', fontSize: '0.75rem' }}
+                              onClick={() => selectSeason(details, selectedSeason, src, activeVariant?.version || 'vostfr')}
+                            >
+                              {SOURCE_LABELS[src] || src}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -339,7 +472,7 @@ export default function AnimeDetailModal({
                           <button
                             className="btn btn-secondary"
                             style={{ fontSize: '0.78rem', padding: '4px 10px' }}
-                            onClick={() => onDownloadBulk(animeTitle, currentSeasonName, episodes)}
+                            onClick={() => onDownloadBulk(historyTitle, currentSeasonName, episodes)}
                           >
                             <Download size={14} /> Tout Télécharger
                           </button>
@@ -355,7 +488,11 @@ export default function AnimeDetailModal({
                   </div>
                 ) : episodes.length === 0 ? (
                   <p style={{ color: 'var(--text-muted)' }}>
-                    {isScanMode ? "Aucun chapitre de scan trouvé." : "Aucun épisode trouvé."}
+                    {isScanMode
+                      ? "Aucun chapitre de scan trouvé."
+                      : activeVariant?.version === 'vf'
+                        ? "Aucun épisode trouvé en VF pour cette source."
+                        : "Aucun épisode trouvé."}
                   </p>
                 ) : (
                   <div style={{
@@ -434,7 +571,7 @@ export default function AnimeDetailModal({
                     ) : (
                       episodes.map((ep, idx) => {
                         const epNum = String(ep.num || ep.title || idx + 1);
-                        const watched = isEpisodeWatched(currentSeasonName, epNum);
+                        const watched = isEpisodeWatched(epNum);
                         const localInfo = downloadedEpisodes[epNum];
                         const isDownloaded = Boolean(localInfo);
 
@@ -477,7 +614,7 @@ export default function AnimeDetailModal({
                                 className="btn btn-primary"
                                 style={{ flex: 1, padding: '4px 8px', fontSize: '0.78rem' }}
                                 onClick={() => onPlayEpisode(
-                                  animeTitle,
+                                  historyTitle,
                                   currentSeasonName,
                                   ep,
                                   episodes,
@@ -491,7 +628,7 @@ export default function AnimeDetailModal({
                               <button
                                 className={`btn ${watched ? 'btn-success' : 'btn-secondary'}`}
                                 style={{ padding: '4px 8px', fontSize: '0.78rem' }}
-                                onClick={(e) => toggleEpisodeWatched(currentSeasonName, epNum, e)}
+                                onClick={(e) => toggleEpisodeWatched(epNum, e)}
                                 title={watched ? "Marquer non vu" : "Marquer vu"}
                               >
                                 <Check size={14} />
@@ -499,7 +636,7 @@ export default function AnimeDetailModal({
                               <button
                                 className={`btn btn-icon ${isDownloaded ? 'btn-success' : 'btn-secondary'}`}
                                 style={{ width: '28px', height: '28px' }}
-                                onClick={() => onDownloadEpisode(animeTitle, currentSeasonName, ep)}
+                                onClick={() => onDownloadEpisode(historyTitle, currentSeasonName, ep)}
                                 title={isDownloaded ? "Déjà téléchargé sur le disque (Re-télécharger)" : "Télécharger sur le disque"}
                               >
                                 <Download size={12} />
@@ -512,6 +649,7 @@ export default function AnimeDetailModal({
                   </div>
                 )}
               </div>
+              </div>
             </div>
           )}
         </div>
@@ -520,7 +658,7 @@ export default function AnimeDetailModal({
       {/* Fullscreen Manga Reader Modal */}
       {readingChapter !== null && (
         <MangaReaderModal
-          mangaTitle={animeTitle}
+          mangaTitle={historyTitle}
           initialChapterNum={readingChapter}
           chapters={episodes}
           onClose={() => setReadingChapter(null)}

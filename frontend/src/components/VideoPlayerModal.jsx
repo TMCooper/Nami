@@ -18,6 +18,7 @@ import {
   VolumeX,
   Volume1
 } from 'lucide-react';
+import { findStoredRecord } from '../utils/titles';
 
 export default function VideoPlayerModal({
   currentUser,
@@ -38,6 +39,16 @@ export default function VideoPlayerModal({
   const controlsTimeoutRef = useRef(null);
 
   const [streamInfo, setStreamInfo] = useState(null);
+  // Every player (host) of the episode; selectedEmbed is the player being resolved (picked by the
+  // user, or the next one tried automatically), shownEmbed the one actually displayed
+  const [players, setPlayers] = useState(episode?.players || []);
+  const [selectedEmbed, setSelectedEmbed] = useState(null);
+  const [shownEmbed, setShownEmbed] = useState(null);
+  const playersRef = useRef(players);
+  playersRef.current = players;
+  const triedEmbedsRef = useRef(new Set());
+  const userPickedRef = useRef(false);
+  const firstIframeRef = useRef(null); // best-ranked player without a direct stream, kept as last resort
   const [localFile, setLocalFile] = useState(initialFilePath || episode?.file_path || null);
   const [activeSourceType, setActiveSourceType] = useState((initialFilePath || episode?.file_path) ? 'local' : 'online');
   const [isLoading, setIsLoading] = useState(!initialFilePath && !episode?.file_path);
@@ -107,6 +118,28 @@ export default function VideoPlayerModal({
       });
   }, [animeTitle, season, epId, initialFilePath, episode]);
 
+  // Players list: inline for Anime-Sama episodes, fetched from the episode page for VoirAnime
+  useEffect(() => {
+    setSelectedEmbed(null);
+    setShownEmbed(null);
+    triedEmbedsRef.current = new Set();
+    userPickedRef.current = false;
+    firstIframeRef.current = null;
+    if (episode?.players?.length) {
+      setPlayers(episode.players);
+      return;
+    }
+    setPlayers([]);
+    const pageUrl = episode?.embed_url || episode?.url || '';
+    if (!pageUrl.includes('voir-anime')) return;
+    let cancelled = false;
+    fetch(`/api/episode/players?url=${encodeURIComponent(pageUrl)}`)
+      .then((res) => (res.ok ? res.json() : { players: [] }))
+      .then((data) => { if (!cancelled) setPlayers(data.players || []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [episode]);
+
   // Fetch watch history to know if we should offer resume, and resolve online stream
   useEffect(() => {
     if (!animeTitle || !episode) return;
@@ -127,7 +160,7 @@ export default function VideoPlayerModal({
       })
         .then((res) => res.json())
         .then((data) => {
-          const epRecord = data[animeTitle]?.episodes?.[`${season}:${epId}`];
+          const epRecord = findStoredRecord(data, animeTitle)?.episodes?.[`${season}:${epId}`];
           if (epRecord && epRecord.position_sec > 10 && !epRecord.watched) {
             setResumeTime(epRecord.position_sec);
             setShowResumePrompt(true);
@@ -136,15 +169,33 @@ export default function VideoPlayerModal({
         .catch(() => {});
     }
 
-    const embedUrl = episode.embed_url || episode.url;
+    let cancelled = false; // a newer episode / player choice supersedes this resolution
+    const embedUrl = selectedEmbed || episode.embed_url || episode.url;
     if (embedUrl && activeSourceType !== 'local') {
+      triedEmbedsRef.current.add(embedUrl);
       fetch(`/api/resolve?embed_url=${encodeURIComponent(embedUrl)}`)
         .then((res) => res.json())
         .then((data) => {
-          setStreamInfo(data);
+          if (cancelled) return;
+          if (data.iframe_url) triedEmbedsRef.current.add(data.iframe_url);
+          let shown = { data, embed: data.iframe_url || embedUrl };
+          if (!data.stream_url && !userPickedRef.current) {
+            // No direct stream from this host: try the next player, and if none has one,
+            // show the best-ranked player's iframe (never override a player the user picked)
+            if (!firstIframeRef.current && data.iframe_url) firstIframeRef.current = shown;
+            const next = playersRef.current.find((p) => !triedEmbedsRef.current.has(p.embed_url));
+            if (next) {
+              setSelectedEmbed(next.embed_url);
+              return;
+            }
+            shown = firstIframeRef.current || shown;
+          }
+          setStreamInfo(shown.data);
+          setShownEmbed(shown.embed);
           setIsLoading(false);
         })
         .catch((err) => {
+          if (cancelled) return;
           console.error("Error resolving stream:", err);
           setIsLoading(false);
         });
@@ -152,10 +203,11 @@ export default function VideoPlayerModal({
       // Background resolve stream in case user toggles from local to online stream
       fetch(`/api/resolve?embed_url=${encodeURIComponent(embedUrl)}`)
         .then((res) => res.json())
-        .then((data) => setStreamInfo(data))
+        .then((data) => { if (!cancelled) setStreamInfo(data); })
         .catch(() => {});
     }
-  }, [episode, animeTitle, season, userId, epId, initialTime, activeSourceType]);
+    return () => { cancelled = true; };
+  }, [episode, animeTitle, season, userId, epId, initialTime, activeSourceType, selectedEmbed]);
 
   // Setup video source (Local disk stream vs HLS / MP4 online)
   useEffect(() => {
@@ -529,12 +581,30 @@ export default function VideoPlayerModal({
             </span>
           ) : (
             <span className="badge" style={{ background: 'rgba(88, 166, 255, 0.25)', color: '#58A6FF', border: '1px solid rgba(88, 166, 255, 0.4)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '5px' }}>
-              <Wifi size={12} /> Version en ligne (Streaming M3U8)
+              <Wifi size={12} /> En ligne{streamInfo?.host ? ` · ${streamInfo.host}` : ''}{streamInfo?.stream_type ? ` (${streamInfo.stream_type.toUpperCase()})` : ''}
             </span>
           )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+          {/* Player (host) selector: another host when the current one fails */}
+          {activeSourceType !== 'local' && players.length > 1 && (
+            <select
+              className="input-field"
+              style={{ fontSize: '0.78rem', padding: '5px 8px', maxWidth: '180px' }}
+              value={Math.max(0, players.findIndex((p) => p.embed_url === (shownEmbed || selectedEmbed)))}
+              onChange={(e) => {
+                userPickedRef.current = true;
+                setSelectedEmbed(players[Number(e.target.value)]?.embed_url || null);
+              }}
+              title="Changer de lecteur"
+            >
+              {players.map((p, idx) => (
+                <option key={p.embed_url} value={idx}>Lecteur {idx + 1} · {p.host}</option>
+              ))}
+            </select>
+          )}
+
           {/* Source Switcher — only show when both local AND online stream exist */}
           {localFile && streamInfo?.stream_url && (
             <button

@@ -26,6 +26,15 @@ class YoitsuService:
             self._config = None
             self._config_retry_at = 0.0
 
+    def api_link(self, source: str) -> str:
+        """API base of a YoitsuWrap source ('ANIMESAMA' / 'VOIRANIME') without pinging anything."""
+        with self._lock:
+            conf = (self._config or {}).get(source)
+        if conf is not None:
+            return conf.API_LINK
+        port = 5000 if source == "ANIMESAMA" else 8000
+        return f"http://127.0.0.1:{port}/api"
+
     def allow_retry(self):
         """Lift the retry delay (an API just came back) without dropping a valid cached Config."""
         with self._lock:

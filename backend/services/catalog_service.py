@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 import httpx
+from urllib.parse import urljoin, urlparse
 from typing import Optional, List, Dict
 from bs4 import BeautifulSoup
 from backend.services import api_state
@@ -66,6 +67,29 @@ def get_base_anime_title(title: str) -> str:
     t = re.sub(r'\s+(?:II|III|IV|V|\d+(?:st|nd|rd|th)?\s*Season|Season\s*\d+|The Final Season|Specials?|OAV|OVA)\s*$', '', t, flags=re.IGNORECASE)
     t = re.sub(r'\s+\d{4}$', '', t)
     return t.strip()
+
+
+def host_label(url: str) -> str:
+    """'https://vidmoly.net/embed-x.html' -> 'vidmoly'."""
+    host = (urlparse(url).hostname or "").lower()
+    parts = [p for p in host.split(".") if p and p != "www"]
+    return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "lecteur")
+
+
+# Hosts that resolve to a direct stream first (ansembed first, as in AnimeSamaApi); hosts that
+# only give an embed page (uqload, ...) after; sibnet last (often unavailable)
+_ANIME_SAMA_HOST_ORDER = (
+    ("ansembed", "movembed"), ("vidmoly",), ("smoothpre", "vidhide", "streamwish"), ("sendvid",),
+    ("voe",), ("mytv", "voembed"), ("embed4me", "lpayer"),
+)
+
+
+def anime_sama_player_rank(url: str) -> int:
+    u = url.lower()
+    for rank, hosts in enumerate(_ANIME_SAMA_HOST_ORDER):
+        if any(h in u for h in hosts):
+            return rank
+    return 99 if "sibnet" in u else 50
 
 
 class CatalogService:
@@ -292,6 +316,22 @@ class CatalogService:
         matched_tokens = [w for w in q_tokens if w in t_lower]
         return (len(matched_tokens) / len(q_tokens)) * 70.0
 
+    @staticmethod
+    def _raw_voiranime_entries(items: list) -> list:
+        """One item per VoirAnime post (season / VF variant kept apart): grouping is done by the Yoitsu index."""
+        out, seen = [], set()
+        for it in items:
+            name = it.get("title", it.get("name", ""))
+            url = it.get("link", it.get("lien", it.get("url", "")))
+            if not name or not url or url in seen:
+                continue
+            seen.add(url)
+            cover = it.get("cover", "")
+            if not (is_usable_cover(cover) and is_trusted_cover(cover, "voiranime")):
+                cover = ""
+            out.append({"title": name, "url": url, "cover": cover})
+        return out
+
     def _group_voiranime_entries(self, items: list) -> list:
         """Unifies individual season/variant entries (e.g. S2, VF, Specials) into their parent Anime object."""
         grouped = {}
@@ -422,7 +462,7 @@ class CatalogService:
 
         return results
 
-    async def _search_voiranime(self, query: str = "") -> list:
+    async def _search_voiranime(self, query: str = "", group: bool = True, cover_wait: float = SEARCH_COVER_WAIT) -> list:
         results = []
         q_clean = query.strip()
         try:
@@ -437,10 +477,10 @@ class CatalogService:
                     matches = data.get("results", data) if isinstance(data, dict) else data
                     if isinstance(matches, list):
                         # Unify sub-seasons (e.g. Season II, Specials, VF) under parent Anime
-                        grouped_matches = self._group_voiranime_entries(matches)
+                        grouped_matches = self._group_voiranime_entries(matches) if group else self._raw_voiranime_entries(matches)
 
                         # Resolve missing covers concurrently (bounded wait, the rest completes in background)
-                        await self._fill_missing_voiranime_covers(grouped_matches, limit=15, wait_seconds=SEARCH_COVER_WAIT)
+                        await self._fill_missing_voiranime_covers(grouped_matches, limit=15, wait_seconds=cover_wait)
 
                         for item in grouped_matches:
                             name = item.get("title", item.get("name", ""))
@@ -473,7 +513,7 @@ class CatalogService:
                             raw_items = [{"title": k, "link": v} for k, v in list(cat_dict.items())[:300]]
 
                     # Unify sub-seasons (e.g. S2, VF, Specials) under parent Anime
-                    grouped_items = self._group_voiranime_entries(raw_items)
+                    grouped_items = self._group_voiranime_entries(raw_items) if group else self._raw_voiranime_entries(raw_items)
 
                     # Home catalogue: never wait on cover scraping, covers show up on the next load
                     await self._fill_missing_voiranime_covers(grouped_items, limit=20, wait_seconds=0)
@@ -539,6 +579,20 @@ class CatalogService:
             ]
         return out
 
+    @staticmethod
+    def _anime_sama_page_metadata(soup) -> tuple:
+        """Synopsis, alternative titles and genres of an Anime-Sama catalogue page."""
+        synopsis = ""
+        node = soup.find(id="synopsisText") or soup.select_one(".oe-synopsis p") or soup.select_one(".oe-synopsis")
+        if node:
+            for extra in node.find_all(["button", "a"]):
+                extra.decompose()
+            synopsis = re.sub(r'\s+', ' ', node.get_text(" ", strip=True)).strip()
+        alt_node = soup.find(id="titreAlter")
+        alt_titles = [t.strip() for t in alt_node.get_text(" ", strip=True).split(",") if t.strip()] if alt_node else []
+        genres = [g.get_text(" ", strip=True) for g in soup.select(".oe-genres .genre-pill") if g.get_text(strip=True)]
+        return synopsis, alt_titles, genres
+
     async def _get_details_anime_sama(self, url: str) -> dict:
         ALIASES = {
             "lattaque-des-titans": "shingeki-no-kyojin",
@@ -555,12 +609,17 @@ class CatalogService:
         try:
             fetch_url = target_url.replace("anime-sama.fr", "anime-sama.to")
             resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code == 200:
+            if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
+                # Stale mirror domains redirect to the home page: retry on the main domain
+                fetch_url = f"https://anime-sama.to/catalogue/{slug}/"
+                resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and "/catalogue/" in str(resp.url):
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 h1 = soup.find('h1', id='titreOeuvre') or soup.find('h1')
                 anime_name = h1.text.strip() if h1 and h1.text.strip() else slug.replace("-", " ").title()
 
                 cover = extract_page_cover(soup, str(resp.url)) or default_cover
+                synopsis, alt_titles, genres = self._anime_sama_page_metadata(soup)
 
                 pattern = re.compile(r'panneau(?:Anime|Film|Scan|Visual)\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)')
                 matches = pattern.findall(resp.text)
@@ -582,7 +641,9 @@ class CatalogService:
                         "title": anime_name,
                         "url": target_url,
                         "cover": cover,
-                        "synopsis": "",
+                        "synopsis": synopsis,
+                        "alt_titles": alt_titles,
+                        "genres": genres,
                         "source": "anime_sama",
                         "seasons": seasons
                     }
@@ -815,6 +876,165 @@ class CatalogService:
 
         return episodes
 
+    @staticmethod
+    def _voiranime_player_rank(label: str) -> int:
+        kl = label.lower()
+        if "sibnet" in kl: return 999
+        if "mytv" in kl or "voembed" in kl: return 1
+        if "vidmoly" in kl: return 2
+        if "sendvid" in kl: return 3
+        if "voe" in kl: return 4
+        if "streamtape" in kl or "stape" in kl: return 5
+        return 10
+
+    @classmethod
+    def parse_voiranime_players(cls, page_html: str) -> list:
+        """Every usable player of a VoirAnime episode page, best first (sibnet and internal players skipped)."""
+        players = []
+        sources_match = re.search(r'var\s+thisChapterSources\s*=\s*(\{.*?\});', page_html, re.DOTALL)
+        if sources_match:
+            try:
+                src_dict = json.loads(sources_match.group(1))
+            except ValueError:
+                src_dict = {}
+            for label in sorted(src_dict.keys(), key=cls._voiranime_player_rank):
+                src_match = re.search(r'src=["\']([^"\']+)["\']', str(src_dict[label]))
+                if not src_match or "sibnet" in label.lower():
+                    continue
+                embed = src_match.group(1).replace("\\/", "/")
+                if embed.startswith("//"):
+                    embed = "https:" + embed
+                if "voiranime" not in embed and "sibnet" not in embed.lower():
+                    players.append({"host": label, "embed_url": embed})
+        else:
+            soup = BeautifulSoup(page_html, 'html.parser')
+            for ifr in soup.find_all('iframe'):
+                src = ifr.get('src') or ""
+                if src.startswith("//"):
+                    src = "https:" + src
+                if src and "voiranime" not in src and "sibnet" not in src.lower():
+                    players.append({"host": host_label(src), "embed_url": src})
+        return players
+
+    async def extract_voiranime_players(self, episode_url: str) -> list:
+        try:
+            page_resp = await self.client.get(episode_url, headers={**HEADERS, "Referer": "https://voir-anime.to/"}, timeout=8.0)
+            if page_resp.status_code == 200:
+                return self.parse_voiranime_players(page_resp.text)
+        except Exception as e:
+            print(f"[CatalogService] VoirAnime iframe extraction error: {e}")
+        return []
+
+    async def fetch_anime_sama_players(self, season_url: str, version: str = "vostfr", refresh: bool = False) -> list:
+        """Episodes of an Anime-Sama season with every player (lecteur) of episodes.js, best first.
+
+        Players are resolved only when played, so the list loads fast and the UI can switch host.
+        """
+        base = re.sub(r"/(?:vostfr|vf)/?$", "", season_url.rstrip("/"))
+        target_url = f"{base}/{version}"
+        cache_key = f"as_players:{target_url}"
+        if not refresh:
+            cached = cache_service.get_anime_details("anime_sama_eps", cache_key)
+            if isinstance(cached, list) and cached:
+                return cached
+
+        lecteurs = await self._anime_sama_lecteurs(target_url) or {}
+        episodes = []
+        count = max((len(urls) for urls in lecteurs.values()), default=0)
+        for idx in range(count):
+            players = [
+                {"host": host_label(urls[idx]), "embed_url": urls[idx], "lecteur": name}
+                for name, urls in lecteurs.items() if idx < len(urls) and urls[idx]
+            ]
+            players.sort(key=lambda p: anime_sama_player_rank(p["embed_url"]))
+            if players:
+                episodes.append({
+                    "num": idx + 1,
+                    "title": f"Épisode {idx + 1}",
+                    "embed_url": players[0]["embed_url"],
+                    "stream_url": None,
+                    "players": players,
+                })
+        if episodes:
+            cache_service.save_anime_details("anime_sama_eps", cache_key, episodes)
+        return episodes
+
+    async def _anime_sama_lecteurs(self, target_url: str) -> Optional[dict]:
+        """{lecteur name: [embed url per episode]} from the season's episodes.js.
+
+        {} means the season page has no episodes (e.g. no VF); None means it could not be checked.
+        """
+        try:
+            resp = await self.client.get(target_url, timeout=10.0)
+            if resp.status_code == 404:
+                return {}
+            if resp.status_code != 200 or "/catalogue/" not in str(resp.url):
+                return None
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            script_tag = soup.find("script", src=lambda s: s and "episodes.js" in s)
+            if not script_tag:
+                return {}
+            js_src = script_tag.get("src", "").strip("\"'")
+            js_url = urljoin(f"{str(resp.url).rstrip('/')}/", js_src)
+            js_resp = await self.client.get(js_url, headers={"Referer": target_url}, timeout=10.0)
+            if js_resp.status_code != 200:
+                return None
+            lecteurs = {}
+            for name, content in re.findall(r"var\s+(eps\w+)\s*=\s*\[(.*?)\];", js_resp.text, re.DOTALL):
+                urls = re.findall(r"""['"](https?://[^'"]+)['"]""", content)
+                if urls:
+                    lecteurs[name] = urls
+            return lecteurs
+        except Exception as e:
+            print(f"[CatalogService] episodes.js scrape error: {e}")
+            return None
+
+    async def fetch_anime_sama_page(self, url: str, refresh: bool = False) -> Optional[dict]:
+        """Metadata of an Anime-Sama catalogue page (h1, synopsis, alternative titles, genres, seasons).
+
+        The getInfoAnime contract has no alternative titles / genres, and its titles are
+        ASCII-normalized: the page h1 is the legacy history / download key. Cached per slug.
+        """
+        slug = url.rstrip("/").split("/")[-1].lower()
+        cache_key = f"as_page:{slug}"
+        if not refresh:
+            cached = cache_service.get_anime_details("anime_sama_page", cache_key)
+            if isinstance(cached, dict) and cached.get("title"):
+                return cached
+        try:
+            resp = await self.client.get(url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
+                resp = await self.client.get(f"https://anime-sama.to/catalogue/{slug}/", timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200 or f"/catalogue/{slug}" not in str(resp.url).lower():
+                return None
+        except Exception as e:
+            print(f"[CatalogService] Anime-Sama page fetch error: {e}")
+            return None
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        h1 = soup.find('h1', id='titreOeuvre')
+        if not h1 or not h1.get_text(strip=True):
+            return None
+        synopsis, alt_titles, genres = self._anime_sama_page_metadata(soup)
+        base_clean = str(resp.url).rstrip("/")
+        seasons, seen = [], set()
+        pattern = re.compile(r'panneau(?:Anime|Film|Scan|Visual)\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)')
+        for nom, lien in pattern.findall(re.sub(r"/\*.*?\*/", "", resp.text, flags=re.DOTALL)):
+            if nom.lower() != "nom" and lien.lower() != "url" and nom not in seen:
+                seen.add(nom)
+                seasons.append({"label": nom, "url": f"{base_clean}/{lien.lstrip('/')}"})
+        page = {
+            "slug": slug,
+            "title": h1.get_text(" ", strip=True),
+            "url": base_clean,
+            "cover": extract_page_cover(soup, str(resp.url)),
+            "synopsis": synopsis,
+            "alt_titles": alt_titles,
+            "genres": genres,
+            "seasons": seasons,
+        }
+        cache_service.save_anime_details("anime_sama_page", cache_key, page)
+        return page
+
     async def resolve_stream(self, embed_url: str, source: str = "anime_sama") -> dict:
         result = {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
 
@@ -825,47 +1045,11 @@ class CatalogService:
 
         # Special handling for VoirAnime: episode URL is a webpage, extract the real video player iframe!
         if "voir-anime.to" in target_embed or source == "voiranime":
-            try:
-                page_resp = await self.client.get(target_embed, headers={**HEADERS, "Referer": "https://voir-anime.to/"}, timeout=8.0)
-                if page_resp.status_code == 200:
-                    page_html = page_resp.text
-                    sources_match = re.search(r'var\s+thisChapterSources\s*=\s*(\{.*?\});', page_html, re.DOTALL)
-                    if sources_match:
-                        src_dict = json.loads(sources_match.group(1))
-                        # Preferred video player order: voembed/mytv, vidmoly, sendvid, voe, streamtape
-                        def player_rank(k):
-                            kl = k.lower()
-                            if "sibnet" in kl: return 999
-                            if "mytv" in kl or "voembed" in kl: return 1
-                            if "vidmoly" in kl: return 2
-                            if "sendvid" in kl: return 3
-                            if "voe" in kl: return 4
-                            if "streamtape" in kl or "stape" in kl: return 5
-                            return 10
-
-                        sorted_keys = sorted(src_dict.keys(), key=player_rank)
-                        for k in sorted_keys:
-                            if "sibnet" in k.lower():
-                                continue
-                            ifr_code = src_dict[k]
-                            src_match = re.search(r'src=["\']([^"\']+)["\']', ifr_code)
-                            if src_match:
-                                extracted = src_match.group(1).replace(r"\/", "/")
-                                if "voiranime" not in extracted:
-                                    target_embed = extracted
-                                    result["iframe_url"] = extracted
-                                    result["host"] = k
-                                    break
-                    else:
-                        soup = BeautifulSoup(page_html, 'html.parser')
-                        for ifr in soup.find_all('iframe'):
-                            src = ifr.get('src')
-                            if src and "voiranime" not in src and "sibnet" not in src.lower():
-                                target_embed = src
-                                result["iframe_url"] = src
-                                break
-            except Exception as e:
-                print(f"[CatalogService] VoirAnime iframe extraction error: {e}")
+            players = await self.extract_voiranime_players(target_embed)
+            if players:
+                target_embed = players[0]["embed_url"]
+                result["iframe_url"] = target_embed
+                result["host"] = players[0]["host"]
 
         # Now resolve the clean target embed via VoirAnime resolver to obtain direct m3u8 or mp4
         try:

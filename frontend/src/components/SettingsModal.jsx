@@ -94,7 +94,7 @@ export default function SettingsModal({ isOpen, onClose }) {
   };
 
   return (
-    <div style={{
+    <div className="modal-overlay" style={{
       position: 'fixed',
       inset: 0,
       zIndex: 60,
@@ -106,7 +106,7 @@ export default function SettingsModal({ isOpen, onClose }) {
       backdropFilter: 'blur(8px)'
     }} onClick={onClose}>
       <div
-        className="surface animate-fade-in"
+        className="surface animate-fade-in modal-sheet"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
@@ -156,7 +156,7 @@ export default function SettingsModal({ isOpen, onClose }) {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          <div className="form-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
             <div>
               <label style={labelStyle}>Source par Défaut</label>
               <select value={defaultProvider} onChange={(e) => setDefaultProvider(e.target.value)} style={inputStyle}>

@@ -288,7 +288,7 @@ export default function AnimeDetailModal({
 
   return (
     <>
-      <div style={{
+      <div className="modal-overlay" style={{
         position: 'fixed',
         inset: 0,
         zIndex: 50,
@@ -300,7 +300,7 @@ export default function AnimeDetailModal({
         backdropFilter: 'blur(8px)'
       }} onClick={onClose}>
         <div
-          className="surface animate-fade-in"
+          className="surface animate-fade-in modal-sheet"
           onClick={(e) => e.stopPropagation()}
           style={{
             width: '100%',
@@ -346,13 +346,14 @@ export default function AnimeDetailModal({
                   backgroundPosition: 'center'
                 }} />
               )}
-              <div style={{ padding: '24px', paddingTop: details?.banner ? '0' : '24px' }}>
+              <div className="modal-body" style={{ padding: '24px', paddingTop: details?.banner ? '0' : '24px' }}>
               {/* Header Info */}
               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
                 <img
                   src={animeCover || DEFAULT_ANIME_COVER}
                   alt={animeTitle}
                   onError={imageFallback(details?.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
+                  className="detail-cover"
                   style={{
                     width: '160px',
                     height: '230px',
@@ -542,7 +543,7 @@ export default function AnimeDetailModal({
                         : "Aucun épisode trouvé."}
                   </p>
                 ) : (
-                  <div style={{
+                  <div className="episode-grid" style={{
                     display: 'grid',
                     gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
                     gap: '10px',

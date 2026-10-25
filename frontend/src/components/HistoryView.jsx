@@ -354,6 +354,7 @@ export default function HistoryView({ currentUser, resumingKey = null, onSelectA
               >
                 {/* 16:9 Thumbnail Box (Classic YouTube Preview) */}
                 <div
+                  className="history-thumb"
                   style={{
                     position: 'relative',
                     width: '240px',

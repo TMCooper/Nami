@@ -561,3 +561,115 @@ body {
     transition: none;
   }
 }
+
+/* --- Phase 4: phones, tablets and touch --- */
+
+/* Touch screens: every control is at least a 40 px target (desktop sizes stay as they are) */
+@media (pointer: coarse) {
+  .btn {
+    min-height: 40px;
+  }
+  .btn-icon {
+    min-width: 40px;
+  }
+  select,
+  input:not([type]),
+  input[type="text"],
+  input[type="search"],
+  input[type="password"],
+  input[type="number"],
+  .input-field {
+    min-height: 40px;
+    font-size: 16px; /* below 16px, iOS zooms into the field on focus */
+  }
+}
+
+/* Phones. Desktop sizes are inline styles, hence the !important on these few overrides */
+@media (max-width: 640px) {
+  main {
+    padding: 0 12px !important;
+  }
+  /* Dialogs become full-screen sheets */
+  .modal-overlay {
+    padding: 0 !important;
+    align-items: stretch !important;
+  }
+  .modal-sheet {
+    max-width: none !important;
+    max-height: none !important;
+    height: 100%;
+    height: 100dvh;
+    border-radius: 0 !important;
+    border: none !important;
+    overflow-y: auto !important;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .modal-sheet .modal-body {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+  }
+  .detail-cover {
+    width: 112px !important;
+    height: 160px !important;
+  }
+  /* One scroll for the whole sheet, never a list scrolling inside it */
+  .episode-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .form-grid-2 {
+    grid-template-columns: 1fr !important;
+  }
+  .history-thumb {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9;
+  }
+  .shelf-title {
+    font-size: 1.1rem;
+  }
+}
+
+/* Player on phones: actions first (close always visible, icons only), the title on its own line */
+@media (max-width: 640px) {
+  .player-topbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px 18px !important;
+  }
+  .player-topbar .player-actions {
+    order: 1;
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .player-topbar .player-actions select {
+    flex: 1;
+    min-width: 0;
+    max-width: none !important;
+  }
+  .player-topbar .player-title {
+    order: 2;
+    width: 100%;
+  }
+  .player-topbar .player-title h3 {
+    font-size: 0.88rem !important;
+  }
+  .player-topbar .btn-label {
+    display: none;
+  }
+}
+/* Touch devices set the volume with their own buttons */
+@media (pointer: coarse) {
+  .player-volume {
+    display: none;
+  }
+}
+
+/* Tablets: a bit more room for the cards */
+@media (min-width: 641px) and (max-width: 1024px) {
+  .card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+}

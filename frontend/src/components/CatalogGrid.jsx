@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { RotateCcw, Shuffle, Sparkles, History, Film, Bookmark } from 'lucide-react';
 
 import AnimeCard, { AnimeCardSkeleton } from './AnimeCard';
@@ -10,6 +10,29 @@ const hasSource = (anime, source) =>
   anime.source === source || (anime.sources || []).some((s) => s.source === source);
 
 export { DEFAULT_ANIME_COVER };
+
+const PAGE_SIZE = 48; // catalogue cards rendered per step: the full catalogue is hundreds of cards
+
+// Renders a long list a page at a time, the next page when the end comes near
+// (back to the first page when the list itself changes: new results or another source filter)
+function useProgressiveList(items, results, source) {
+  const [count, setCount] = useState(PAGE_SIZE);
+  // A callback ref: the sentinel only appears once the list has loaded, the observer must follow it
+  const [sentinel, setSentinel] = useState(null);
+
+  useEffect(() => { setCount(PAGE_SIZE); }, [results, source]);
+
+  useEffect(() => {
+    if (!sentinel || count >= items.length || !('IntersectionObserver' in window)) return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setCount((c) => c + PAGE_SIZE);
+    }, { rootMargin: '800px 0px' });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [sentinel, count, items.length]);
+
+  return { visible: items.slice(0, count), hasMore: count < items.length, sentinelRef: setSentinel, showMore: () => setCount((c) => c + PAGE_SIZE) };
+}
 
 function Shelf({ icon, title, action, children }) {
   return (
@@ -47,6 +70,7 @@ export default function CatalogGrid({
   const filteredRecentAnimes = (recentAnimes || []).filter(bySource);
   const filteredRandomSuggestions = (randomSuggestions || []).filter(bySource);
   const filteredResults = (results || []).filter(bySource);
+  const catalogue = useProgressiveList(filteredResults, results, activeSource);
 
   const isBrowsingHome = !searchQuery.trim();
 
@@ -152,9 +176,17 @@ export default function CatalogGrid({
             </p>
           </div>
         ) : (
-          <div className="card-grid">
-            {filteredResults.map((anime, index) => card(anime, anime.id || index))}
-          </div>
+          <>
+            <div className="card-grid">
+              {catalogue.visible.map((anime, index) => card(anime, anime.id || index))}
+            </div>
+            {catalogue.hasMore && (
+              // Observed to load the next page; also a plain button where IntersectionObserver is missing
+              <div ref={catalogue.sentinelRef} style={{ display: 'flex', justifyContent: 'center' }}>
+                <button className="chip" onClick={catalogue.showMore}>Afficher plus</button>
+              </div>
+            )}
+          </>
         )}
       </Shelf>
     </div>

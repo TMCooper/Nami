@@ -761,7 +761,7 @@ export default function VideoPlayerModal({
       }}
     >
       {/* Top Header Overlay */}
-      <div style={{
+      <div className="player-topbar" style={{
         padding: '16px 24px',
         background: 'linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.4) 70%, transparent)',
         display: 'flex',
@@ -776,7 +776,7 @@ export default function VideoPlayerModal({
         pointerEvents: areControlsVisible ? 'auto' : 'none',
         transition: 'opacity 0.25s ease'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+        <div className="player-title" style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
           <h3 style={{
             fontSize: '1rem',
             fontWeight: 700,
@@ -798,7 +798,7 @@ export default function VideoPlayerModal({
           )}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+        <div className="player-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
           {/* Player (host) selector: another host when the current one fails */}
           {activeSourceType !== 'local' && players.length > 1 && (
             <select
@@ -834,13 +834,13 @@ export default function VideoPlayerModal({
           )}
 
           {episodes && episodes.length > 1 && (
-            <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => setShowEpisodeDrawer(!showEpisodeDrawer)}>
-              <List size={14} /> Épisodes
+            <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => setShowEpisodeDrawer(!showEpisodeDrawer)} aria-label="Épisodes">
+              <List size={14} /> <span className="btn-label">Épisodes</span>
             </button>
           )}
 
-          <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => onDownloadEpisode(animeTitle, season, episode)}>
-            <Download size={14} /> Télécharger
+          <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => onDownloadEpisode(animeTitle, season, episode)} aria-label="Télécharger">
+            <Download size={14} /> <span className="btn-label">Télécharger</span>
           </button>
 
           <button
@@ -849,6 +849,7 @@ export default function VideoPlayerModal({
               onClose(flushSample(true)); // App reloads the shelves once this last save is stored
             }}
             title="Fermer le lecteur (Échap)"
+            aria-label="Fermer le lecteur"
           >
             <X size={18} />
           </button>
@@ -1163,6 +1164,7 @@ export default function VideoPlayerModal({
                   {isMuted || volume === 0 ? <VolumeX size={15} /> : volume < 0.5 ? <Volume1 size={15} /> : <Volume2 size={15} />}
                 </button>
                 <input
+                  className="player-volume"
                   type="range"
                   min="0"
                   max="1"

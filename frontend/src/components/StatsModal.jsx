@@ -21,7 +21,7 @@ export default function StatsModal({ isOpen, onClose, currentUser }) {
   if (!isOpen) return null;
 
   return (
-    <div style={{
+    <div className="modal-overlay" style={{
       position: 'fixed',
       inset: 0,
       zIndex: 50,
@@ -33,7 +33,7 @@ export default function StatsModal({ isOpen, onClose, currentUser }) {
       backdropFilter: 'blur(8px)'
     }} onClick={onClose}>
       <div
-        className="surface animate-fade-in"
+        className="surface animate-fade-in modal-sheet"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',

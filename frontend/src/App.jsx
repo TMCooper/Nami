@@ -1,17 +1,28 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
+import { Loader2 } from 'lucide-react';
 import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
-import HistoryView from './components/HistoryView';
-import WatchlistView from './components/WatchlistView';
-import OfflineLibraryView from './components/OfflineLibraryView';
-import AnimeDetailModal from './components/AnimeDetailModal';
-import VideoPlayerModal from './components/VideoPlayerModal';
 import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
 import StatsModal from './components/StatsModal';
 import AuthModal from './components/AuthModal';
 import { normalizeTitle } from './utils/titles';
 import { animeKeys, sameAnime, watchlistPayload } from './utils/animes';
+
+// Loaded on demand: the player alone carries hls.js (about two thirds of the app's code)
+const loadDetail = () => import('./components/AnimeDetailModal');
+const loadPlayer = () => import('./components/VideoPlayerModal');
+const AnimeDetailModal = lazy(loadDetail);
+const VideoPlayerModal = lazy(loadPlayer);
+const HistoryView = lazy(() => import('./components/HistoryView'));
+const WatchlistView = lazy(() => import('./components/WatchlistView'));
+const OfflineLibraryView = lazy(() => import('./components/OfflineLibraryView'));
+
+const TabFallback = () => (
+  <div style={{ padding: '80px 0', display: 'flex', justifyContent: 'center' }}>
+    <Loader2 className="animate-spin" size={26} color="var(--text-muted)" />
+  </div>
+);
 
 const RESTORE_WINDOW_MS = 60000; // a re-add this soon after a removal is an undo: the anime keeps its place
 
@@ -77,6 +88,17 @@ export default function App() {
       }
     } catch {}
   };
+
+  // The anime page and the player are fetched once the home screen is idle: the first tap opens them at once
+  useEffect(() => {
+    const prefetch = () => { loadDetail(); loadPlayer(); };
+    if ('requestIdleCallback' in window) {
+      const id = window.requestIdleCallback(prefetch, { timeout: 5000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const timer = setTimeout(prefetch, 3000);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Check if users exist on startup, force AuthModal if zero users or not logged in
   useEffect(() => {
@@ -507,6 +529,7 @@ export default function App() {
       />
 
       <main style={{ flex: 1, padding: '0 24px', maxWidth: '1440px', width: '100%', margin: '0 auto' }}>
+        <Suspense fallback={<TabFallback />}>
         {activeTab === 'catalog' ? (
           <CatalogGrid
             results={results}
@@ -553,8 +576,10 @@ export default function App() {
             }
           />
         )}
+        </Suspense>
       </main>
 
+      <Suspense fallback={null}>
       {selectedAnime && (
         <AnimeDetailModal
           currentUser={currentUser}
@@ -570,7 +595,10 @@ export default function App() {
           onToggleWatchlist={handleToggleWatchlist}
         />
       )}
+      </Suspense>
 
+      {/* Its own boundary: loading the player must never hide the anime page behind it */}
+      <Suspense fallback={null}>
       {activePlayer && (
         <VideoPlayerModal
           currentUser={currentUser}
@@ -604,6 +632,7 @@ export default function App() {
           }}
         />
       )}
+      </Suspense>
 
       <DownloadManagerDrawer
         isOpen={isDownloadsOpen}

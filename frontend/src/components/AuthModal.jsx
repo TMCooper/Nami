@@ -242,7 +242,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
   const isMandatory = users.length === 0 || !currentUser;
 
   return (
-    <div style={{
+    <div className="modal-overlay" style={{
       position: 'fixed',
       inset: 0,
       zIndex: 70,
@@ -254,7 +254,7 @@ export default function AuthModal({ isOpen, onClose, currentUser, onSelectUser }
       backdropFilter: 'blur(8px)'
     }} onClick={() => { if (!isMandatory) onClose(); }}>
       <div
-        className="surface animate-fade-in"
+        className="surface animate-fade-in modal-sheet"
         onClick={(e) => e.stopPropagation()}
         style={{
           position: 'relative',

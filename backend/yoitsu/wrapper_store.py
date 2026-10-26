@@ -32,15 +32,68 @@ SOURCE_NAMES = {"ANIMESAMA": "anime_sama", "VOIRANIME": "voiranime"}
 WRAPPER_HOST = "YoitsuWrap"
 
 _original_request = requests.sessions.Session.request
+_tracking = threading.local()   # .job: progress dict of the build running in this thread
 
 
 def _request_with_timeout(self, method, url, **kwargs):
     # YoitsuWrap calls requests without a timeout: one hung API call would block the build worker forever
     kwargs.setdefault("timeout", (10, 180))
-    return _original_request(self, method, url, **kwargs)
+    response = _original_request(self, method, url, **kwargs)
+    job = getattr(_tracking, "job", None)
+    if job is not None:
+        _observe(job, url, response)
+    return response
 
 
 requests.sessions.Session.request = _request_with_timeout
+
+
+def _observe(job: dict, url: str, response):
+    """Progress of a build, read from the API calls YoitsuWrap makes (it reports nothing itself)."""
+    try:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        if parsed.path.endswith("/getInfoAnime"):
+            rows = response.json()
+            labels = {r.get("Saison") for r in rows if isinstance(r, dict) and r.get("Saison") not in (None, "Scans")} \
+                if isinstance(rows, list) else set()
+            job["season_labels"] = job.get("season_labels", set()) | labels
+        elif parsed.path.endswith("/getSpecificAnime"):
+            label = (query.get("s") or [""])[0]
+            if label and label != job.get("season"):
+                if job.get("season"):
+                    job["seasons_done"] = job.get("seasons_done", 0) + 1
+                job.update(season=label, checked=0, episodes=0)
+        elif parsed.path.endswith("/getAnimeLink"):
+            links = response.json()
+            if isinstance(links, list) and not job.get("episodes"):
+                job["episodes"] = len(links)
+    except (ValueError, AttributeError):
+        pass
+
+
+def _count_check(check):
+    def wrapper(*args, **kwargs):
+        try:
+            return check(*args, **kwargs)
+        finally:
+            job = getattr(_tracking, "job", None)
+            if job is not None:
+                job["checked"] = job.get("checked", 0) + 1
+    return wrapper
+
+
+def progress_of(job: dict) -> Optional[dict]:
+    """{'value': 0..1, 'step': 'Saison 2 · épisode 4/12'} of a running build."""
+    seasons = max(len(job.get("season_labels") or ()), 1)
+    done = min(job.get("seasons_done", 0), seasons)
+    episodes, checked = job.get("episodes", 0), job.get("checked", 0)
+    current = min(checked / episodes, 1.0) if episodes else 0.0
+    season = job.get("season")
+    if not season:
+        return {"value": 0.02, "step": "Recherche des saisons"}
+    step = f"{season} · épisode {min(checked + 1, episodes)}/{episodes}" if episodes else f"{season} · liens"
+    return {"value": round(min((done + current) / seasons, 0.99), 3), "step": step}
 
 
 def link_expiry(url: str, built_at: float) -> float:
@@ -92,7 +145,13 @@ def snapshot_from_anime(anime, query: str, version: str, sources: List[str], bui
 def build_with_wrapper(query: str, version: str, allowed: Dict[str, set], order: List[str]) -> Optional[dict]:
     """Runs YoitsuWrap for one anime (blocking: worker thread only)."""
     from YoitsuWrap.Anime import Anime
+    from YoitsuWrap.Episode import Episode
     from backend.services.yoitsu_service import yoitsu_service
+
+    if not getattr(Episode.check_vid_health, "_counted", False):
+        counted = _count_check(Episode.check_vid_health)
+        counted._counted = True
+        Episode.check_vid_health = staticmethod(counted)
 
     config = yoitsu_service.get_config()
     if not config:
@@ -114,6 +173,9 @@ def build_with_wrapper(query: str, version: str, allowed: Dict[str, set], order:
             picked[name] = conf
     if not picked:
         return None
+    job = getattr(_tracking, "job", None)
+    if job is not None:
+        job["season_labels"] = set()   # the checks above were not YoitsuWrap's own calls
     anime = Anime.search_by_name(title=query, config=picked, version=version)
     if not isinstance(anime, Anime):
         return None
@@ -169,6 +231,7 @@ class WrapperStore:
             "valid_until": (snap or {}).get("valid_until"),
             "episodes": sum(len(s.get("episodes") or []) for s in (snap or {}).get("seasons") or []),
             "error": job.get("error") if state == "failed" else None,
+            "progress": progress_of(job.get("tracking") or {}) if state == "running" else None,
         }
 
     def ensure(self, key: str, version: str, query: str, allowed: Dict[str, set], order: List[str],
@@ -190,8 +253,10 @@ class WrapperStore:
 
     def _run(self, key: str, version: str, query: str, allowed: Dict[str, set], order: List[str]):
         sid = self._id(key, version)
+        tracking: dict = {}
         with self._lock:
-            self._jobs[sid] = {"state": "running", "at": time.time(), "error": None}
+            self._jobs[sid] = {"state": "running", "at": time.time(), "error": None, "tracking": tracking}
+        _tracking.job = tracking
         try:
             snap = self._builder(query, version, allowed, order)
             if not snap:
@@ -205,6 +270,8 @@ class WrapperStore:
             print(f"[YoitsuWrap] Build failed for '{query}' ({version}): {e}")
             with self._lock:
                 self._jobs[sid] = {"state": "failed", "at": time.time(), "error": str(e)[:200]}
+        finally:
+            _tracking.job = None
 
     def close(self):
         self._executor.shutdown(wait=False, cancel_futures=True)

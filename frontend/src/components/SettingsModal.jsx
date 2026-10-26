@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Check, HardDrive, RefreshCw, GitPullRequest, ArrowDownCircle, CheckCircle, ShieldCheck } from 'lucide-react';
+import SourcesPanel from './SourcesPanel';
 
-export default function SettingsModal({ isOpen, onClose }) {
+export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
   const [rootFolder, setRootFolder] = useState('/downloads');
   const [defaultProvider, setDefaultProvider] = useState('all');
   const [downloadQuality, setDownloadQuality] = useState('1080p');
@@ -129,6 +130,8 @@ export default function SettingsModal({ isOpen, onClose }) {
             <X size={16} />
           </button>
         </div>
+
+        <SourcesPanel onChange={onSourcesChange} />
 
         {/* 1. Storage & Preferences */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen, ShieldCheck } from 'lucide-react';
+import { X, Play, Download, Check, Loader2, CheckCircle2, RotateCw, BookOpen, ShieldCheck, Smartphone } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
 import WatchlistButton from './WatchlistButton';
 import { DEFAULT_ANIME_COVER, imageFallback } from '../utils/placeholders';
@@ -16,6 +16,7 @@ export default function AnimeDetailModal({
   onPlayEpisode,
   onDownloadEpisode,
   onDownloadBulk,
+  onDownloadToDevice,
   isInWatchlist = () => false,
   onToggleWatchlist
 }) {
@@ -35,6 +36,9 @@ export default function AnimeDetailModal({
   const [synopsisOpen, setSynopsisOpen] = useState(false);
   // YoitsuWrap build of this anime: { state: none|queued|running|ready|expired|failed, built_at, ... }
   const [wrapperStatus, setWrapperStatus] = useState(null);
+  // Episodes picked for a download to this device (selection mode of the episode grid)
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
 
   const userId = currentUser?.id || 'default';
 
@@ -102,6 +106,8 @@ export default function AnimeDetailModal({
       setIsLoadingEpisodes(true);
       setEpisodes([]);
       setWrapperStatus(null);
+      setSelecting(false);
+      setSelected(new Set());
     }
 
     if (season.is_scans) {
@@ -159,6 +165,36 @@ export default function AnimeDetailModal({
       clearTimeout(timer);
     };
   }, [details, activeVariant, wrapperStatus]);
+
+  const episodeKey = (ep, idx) => String(ep.num || ep.title || idx + 1);
+
+  const toggleSelected = (key) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  // <folder>/<anime>/<season>/<version>/ep_<n>.mp4: every player of the episode is offered, best first
+  const handleDeviceDownload = async () => {
+    const season = details?.seasons?.find((s) => s.key === selectedSeasonKey);
+    const items = episodes
+      .map((ep, idx) => ({ ep, key: episodeKey(ep, idx) }))
+      .filter(({ key }) => selected.has(key))
+      .map(({ ep, key }) => ({
+        anime: details?.title || anime?.title || 'Anime',
+        season: season?.label || currentSeasonName,
+        version: VERSION_LABELS[activeVariant?.version] || 'VOSTFR',
+        num: key,
+        urls: [...new Set([...(ep.players || []).map((p) => p.embed_url), ep.embed_url, ep.url].filter(Boolean))]
+      }))
+      .filter((item) => item.urls.length);
+    if (!items.length) return;
+    const started = await onDownloadToDevice?.(items);
+    if (started) {
+      setSelecting(false);
+      setSelected(new Set());
+    }
+  };
 
   const checkDownloadedStatus = (title, seasonName) => {
     if (!title) return;
@@ -483,7 +519,17 @@ export default function AnimeDetailModal({
                   {selectedSeason && !isScanMode && wrapperState && wrapperState !== 'none' && (
                     <p style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: wrapperState === 'ready' ? 'var(--accent-green)' : 'var(--text-muted)' }}>
                       {['queued', 'running'].includes(wrapperState) ? (
-                        <><Loader2 className="animate-spin" size={13} /> YoitsuWrap vérifie les liens de cet anime… (les lecteurs des sources restent disponibles)</>
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: '5px', flex: 1, minWidth: 0 }}>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <Loader2 className="animate-spin" size={13} />
+                            YoitsuWrap vérifie les liens{wrapperStatus.progress?.step ? ` · ${wrapperStatus.progress.step}` : '…'}
+                            {wrapperStatus.progress ? ` (${Math.round(wrapperStatus.progress.value * 100)} %)` : ''}
+                          </span>
+                          <span className={`progress-track${wrapperStatus.progress ? '' : ' indeterminate'}`} style={{ maxWidth: '360px' }}>
+                            <span style={{ display: 'block', height: '100%', background: 'var(--yt-red)', borderRadius: '2px', transition: 'width 0.4s ease', width: wrapperStatus.progress ? `${Math.max(3, wrapperStatus.progress.value * 100)}%` : undefined }} />
+                          </span>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Les lecteurs des sources restent disponibles en attendant.</span>
+                        </span>
                       ) : wrapperState === 'ready' ? (
                         <><ShieldCheck size={14} /> Liens vérifiés par YoitsuWrap {formatRelativeDate(wrapperStatus.built_at).toLowerCase()}</>
                       ) : wrapperState === 'expired' ? (
@@ -540,7 +586,7 @@ export default function AnimeDetailModal({
                     {isScanMode ? `📖 Chapitres Scans (${episodes.length})` : `Épisodes (${episodes.length})`}
                   </h3>
                   {episodes.length > 0 && (
-                    <div style={{ display: 'flex', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                       {isScanMode ? (
                         <button
                           className="btn btn-secondary"
@@ -555,8 +601,41 @@ export default function AnimeDetailModal({
                           )}
                           Tout Télécharger les Scans
                         </button>
+                      ) : selecting ? (
+                        <>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ fontSize: '0.78rem', padding: '4px 10px' }}
+                            onClick={() => setSelected(selected.size === episodes.length
+                              ? new Set()
+                              : new Set(episodes.map((ep, idx) => episodeKey(ep, idx))))}
+                          >
+                            {selected.size === episodes.length ? 'Tout désélectionner' : 'Tout sélectionner'}
+                          </button>
+                          <button className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '4px 10px' }} onClick={() => setSelecting(false)}>
+                            Annuler
+                          </button>
+                          <button
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.78rem', padding: '4px 12px' }}
+                            onClick={handleDeviceDownload}
+                            disabled={!selected.size}
+                          >
+                            <Smartphone size={14} /> Télécharger sur cet appareil ({selected.size})
+                          </button>
+                        </>
                       ) : (
                         <>
+                          {onDownloadToDevice && (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ fontSize: '0.78rem', padding: '4px 10px' }}
+                              onClick={() => setSelecting(true)}
+                              title="Choisir des épisodes à enregistrer sur cet appareil (téléphone, PC)"
+                            >
+                              <Smartphone size={14} /> Sur cet appareil
+                            </button>
+                          )}
                           <button
                             className="btn btn-secondary"
                             style={{ fontSize: '0.78rem', padding: '4px 10px' }}
@@ -669,18 +748,33 @@ export default function AnimeDetailModal({
                         const watched = isEpisodeWatched(epNum);
                         const localInfo = downloadedEpisodes[epNum];
                         const isDownloaded = Boolean(localInfo);
+                        const isPicked = selecting && selected.has(episodeKey(ep, idx));
 
                         return (
                           <div
                             key={idx}
                             className="surface-card"
+                            role={selecting ? 'checkbox' : undefined}
+                            aria-checked={selecting ? isPicked : undefined}
+                            tabIndex={selecting ? 0 : undefined}
+                            onClick={selecting ? () => toggleSelected(episodeKey(ep, idx)) : undefined}
+                            onKeyDown={selecting ? (e) => {
+                              if (e.key === ' ' || e.key === 'Enter') {
+                                e.preventDefault();
+                                toggleSelected(episodeKey(ep, idx));
+                              }
+                            } : undefined}
                             style={{
+                              position: 'relative',
+                              cursor: selecting ? 'pointer' : undefined,
                               padding: '10px 12px',
                               borderRadius: 'var(--radius-sm)',
                               display: 'flex',
                               flexDirection: 'column',
                               gap: '8px',
-                              border: watched
+                              border: isPicked
+                                ? '1px solid var(--primary)'
+                                : watched
                                 ? '1px solid rgba(46, 160, 67, 0.4)'
                                 : isDownloaded
                                 ? '1px solid rgba(88, 166, 255, 0.3)'
@@ -688,7 +782,10 @@ export default function AnimeDetailModal({
                               background: isDownloaded ? 'rgba(88, 166, 255, 0.04)' : undefined
                             }}
                           >
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            {selecting && (
+                              <input type="checkbox" className="episode-select" checked={isPicked} readOnly tabIndex={-1} aria-hidden="true" />
+                            )}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: selecting ? '28px' : 0 }}>
                               <span style={{ fontSize: '0.85rem', fontWeight: 600, color: watched ? '#3FB950' : '#fff' }}>
                                 {ep.title || `Épisode ${epNum}`}
                               </span>
@@ -704,7 +801,7 @@ export default function AnimeDetailModal({
                               </div>
                             </div>
 
-                            <div style={{ display: 'flex', gap: '4px' }}>
+                            {!selecting && <div style={{ display: 'flex', gap: '4px' }}>
                               <button
                                 className="btn btn-primary"
                                 style={{ flex: 1, padding: '4px 8px', fontSize: '0.78rem' }}
@@ -737,7 +834,7 @@ export default function AnimeDetailModal({
                               >
                                 <Download size={12} />
                               </button>
-                            </div>
+                            </div>}
                           </div>
                         );
                       })

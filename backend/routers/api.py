@@ -7,9 +7,10 @@ import threading
 import mimetypes
 import hashlib
 import subprocess
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from urllib.parse import unquote
 
@@ -20,6 +21,7 @@ from backend.services.history_service import history_service, client_ref, SOURCE
 from backend.services.watchlist_service import watchlist_service, MAX_INPUT_ITEMS
 from backend.services.user_service import user_service
 from backend.services.cache_service import cache_service
+from backend.services.source_health import source_health
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.gateway import yoitsu_gateway
 from backend.services.net_safety import resolve_media_path, media_root
@@ -348,6 +350,39 @@ async def get_anime_entity(
     except Exception as e:
         print(f"[History] Linking from details failed: {e}")
     return details
+
+@router.get("/sources")
+async def get_sources(refresh: bool = Query(False)):
+    # State of each source (API, site behind it, user switch): drives the settings panel and the home banner
+    await source_health.refresh(force=refresh)
+    return source_health.snapshot()
+
+class SourceSwitchPayload(BaseModel):
+    enabled: bool
+
+@router.post("/sources/{source}")
+async def set_source_enabled(source: str, payload: SourceSwitchPayload):
+    if source not in ("anime_sama", "voiranime"):
+        raise HTTPException(status_code=404, detail="Source inconnue.")
+    source_health.set_enabled(source, payload.enabled)
+    return source_health.snapshot()
+
+class CookiePayload(BaseModel):
+    cookie: str = Field(..., min_length=10, max_length=4000)
+
+@router.post("/sources/voiranime/cookie")
+async def set_voiranime_cookie(payload: CookiePayload):
+    # voiranime_API can pass Cloudflare with the browser's cf_clearance cookie (its /api/setCookie route)
+    api = yoitsu_service.api_link("VOIRANIME")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{api}/setCookie", params={"cookie": payload.cookie.strip()})
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="L'API VoirAnime ne répond pas.")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail="Cookie refusé par l'API VoirAnime.")
+    await source_health.refresh(force=True)
+    return source_health.snapshot()
 
 @router.get("/anime/{entity_id}/wrapper")
 async def get_anime_wrapper_status(entity_id: str, version: str = Query("vostfr", pattern="^(vostfr|vf)$")):

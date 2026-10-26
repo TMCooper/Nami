@@ -153,6 +153,8 @@ async def _warm_up():
     await asyncio.to_thread(yoitsu_service.get_config)
     # A request may have tried before the APIs were up: reload now instead of after the retry delay
     yoitsu_gateway.ensure_catalog(force=True)
+    from backend.services.source_health import source_health
+    source_health.start()
 
 
 @asynccontextmanager
@@ -175,6 +177,8 @@ async def lifespan(app: FastAPI):
     await image_service.close()
     await close_stream_client()
     await yoitsu_gateway.close()
+    from backend.services.source_health import source_health
+    await source_health.close()
     for name in list(_submodule_processes):
         _stop_submodule(name)
 
@@ -198,9 +202,11 @@ app.add_middleware(
 
 from backend.routers.api import router as api_router
 from backend.routers.stream_proxy import router as proxy_router
+from backend.routers.device_download import router as device_download_router
 
 app.include_router(api_router)
 app.include_router(proxy_router)
+app.include_router(device_download_router)
 
 # Mount static frontend build if it exists
 FRONTEND_DIST = os.path.join(PROJECT_ROOT, "frontend", "dist")

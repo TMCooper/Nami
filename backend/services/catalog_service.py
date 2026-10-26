@@ -436,7 +436,9 @@ class CatalogService:
                                     "title": title,
                                     "source": "anime_sama",
                                     "url": link,
-                                    "cover": client_cover_url(cover)
+                                    "cover": client_cover_url(cover),
+                                    # AnimeSamaApi scores with the alternative titles and Anime-Sama's own search
+                                    "score": item.get("score")
                                 })
             else:
                 resp = await self.client.get(f"{AS_API_BASE}/api/loadBaseAnimeData")

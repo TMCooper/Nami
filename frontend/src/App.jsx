@@ -4,6 +4,7 @@ import Header from './components/Header';
 import CatalogGrid from './components/CatalogGrid';
 import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
+import DeviceDownloadsPanel, { useDeviceDownloads } from './components/DeviceDownloads';
 import StatsModal from './components/StatsModal';
 import AuthModal from './components/AuthModal';
 import { normalizeTitle } from './utils/titles';
@@ -40,6 +41,9 @@ export default function App() {
   const [watchlist, setWatchlist] = useState([]);
   const [resumingKey, setResumingKey] = useState(null); // continue card waiting for its season list
   const [notice, setNotice] = useState('');
+  // Source health (API + site + user switch), for the home banner
+  const [sources, setSources] = useState(null);
+  const device = useDeviceDownloads();
 
   const watchlistRef = useRef([]);
   watchlistRef.current = watchlist;
@@ -98,6 +102,13 @@ export default function App() {
     }
     const timer = setTimeout(prefetch, 3000);
     return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const load = () => fetch('/api/sources').then((res) => (res.ok ? res.json() : null)).then((data) => data && setSources(data)).catch(() => {});
+    load();
+    const timer = setInterval(load, 120000);
+    return () => clearInterval(timer);
   }, []);
 
   // Check if users exist on startup, force AuthModal if zero users or not logged in
@@ -529,6 +540,15 @@ export default function App() {
       />
 
       <main style={{ flex: 1, padding: '0 24px', maxWidth: '1440px', width: '100%', margin: '0 auto' }}>
+        {/* A source that is switched on but down is skipped everywhere: say so instead of showing fewer results silently */}
+        {Object.values(sources || {}).filter((s) => s.enabled && !s.usable && s.status !== 'unknown').map((s) => (
+          <div key={s.label} role="status" style={{ marginTop: '16px', padding: '10px 14px', borderRadius: 'var(--radius-md)', background: 'rgba(210, 153, 34, 0.12)', border: '1px solid rgba(210, 153, 34, 0.35)', fontSize: '0.84rem', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ flex: 1, minWidth: '200px' }}>
+              <strong>{s.label}</strong> : {s.message || 'source indisponible'}. Ses animes sont ignorés pour l'instant.
+            </span>
+            <button className="chip" onClick={() => setIsSettingsOpen(true)}>Paramètres des sources</button>
+          </div>
+        ))}
         <Suspense fallback={<TabFallback />}>
         {activeTab === 'catalog' ? (
           <CatalogGrid
@@ -591,6 +611,7 @@ export default function App() {
           }}
           onDownloadEpisode={handleDownloadEpisode}
           onDownloadBulk={handleDownloadBulk}
+          onDownloadToDevice={device.start}
           isInWatchlist={isInWatchlist}
           onToggleWatchlist={handleToggleWatchlist}
         />
@@ -645,7 +666,10 @@ export default function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        onSourcesChange={setSources}
       />
+
+      <DeviceDownloadsPanel {...device} />
 
       <StatsModal
         isOpen={isStatsOpen}

@@ -673,3 +673,85 @@ body {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   }
 }
+
+/* --- Downloads to the device, YoitsuWrap progress --- */
+.progress-track {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.progress-track > div {
+  height: 100%;
+  background: var(--yt-red);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+/* Size unknown while a stream is remuxed: a moving bar instead of a percentage */
+.progress-track.indeterminate > div {
+  width: 35%;
+  animation: indeterminate 1.3s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+.device-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 55;
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  background: #212121;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.device-panel-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.device-panel-list {
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.episode-select {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+@media (max-width: 640px) {
+  .device-panel {
+    right: 12px;
+    left: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    width: auto;
+    max-width: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate > div {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}

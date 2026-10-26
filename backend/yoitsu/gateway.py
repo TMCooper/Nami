@@ -22,6 +22,7 @@ from backend.services.cache_service import cache_service
 from backend.services.catalog_service import catalog_service, get_canonical_search_queries, CatalogService, SEARCH_COVER_WAIT
 from backend.services.anime_refs import clean_trailer, primary_ident
 from backend.services.cover_utils import client_cover_url, is_usable_cover, is_trusted_cover, raw_cover_url, url_host
+from backend.services.source_health import source_health
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.aliases import AliasIndex
 from backend.yoitsu.anilist import AniListClient, media_titles
@@ -141,6 +142,8 @@ class YoitsuGateway:
     # --- YoitsuWrap contract ---
     async def get_info(self, source: str, title: str) -> list:
         """/getInfoAnime of one source: [] when the source is down or has no match (VoirAnime answers 404)."""
+        if not source_health.usable(source):
+            return []
         api = yoitsu_service.api_link(SOURCES[source])
         try:
             resp = await self._http().get(f"{api}/getInfoAnime", params={"q": title})
@@ -170,10 +173,14 @@ class YoitsuGateway:
             data = resp.json() if resp.status_code == 200 else []
         except (httpx.HTTPError, ValueError):
             data = []
+        named = []
         for item in data if isinstance(data, list) else []:
             link = (item.get("link") or item.get("lien")) if isinstance(item, dict) else None
             if link and item.get("title"):
-                entries.append(Entry("anime_sama", link, item["title"], item.get("cover") or ""))
+                entry = Entry("anime_sama", link, item["title"], item.get("cover") or "")
+                entries.append(entry)
+                if item.get("alt_titles"):
+                    named.append((entry, _as_list(item["alt_titles"])))
         try:
             # /catalog keeps VoirAnime's raw names (loadBaseAnimeData strips ':' and accents)
             resp = await self._http().get(f"{va_api.rsplit('/api', 1)[0]}/catalog", timeout=60.0)
@@ -185,9 +192,32 @@ class YoitsuGateway:
                 entries.append(Entry("voiranime", link, name))
         if entries:
             await asyncio.to_thread(self.index.set_catalog, entries)
+            if named and await asyncio.to_thread(self.learn_catalogue_names, named):
+                self._schedule_flush()
             self._catalog_next = time.monotonic() + CATALOG_REFRESH
         else:
             self._catalog_next = time.monotonic() + CATALOG_RETRY
+
+    def learn_catalogue_names(self, named: List[Tuple[Entry, list]]) -> int:
+        """Anime-Sama's catalogue lists each page's alternative titles: a VoirAnime post named exactly like
+        one of them joins that page, so their cards merge without opening anything. CPU-bound: off the loop.
+
+        Same guards as the details: names of two words or more that name a known VoirAnime post, never a
+        name already grouped elsewhere (another page's alias) nor another Anime-Sama page.
+        """
+        va_keys = {title_key(split_version(e.title)[0]) for e in self.index.all_entries() if e.source == "voiranime"}
+        with self.index._lock:
+            as_keys = set(self.index._as_slugs)
+        learned = 0
+        for entry, alt_titles in named:
+            canonical = self.index._cached_canonical(entry)
+            keys = {k for k in learnable_keys(alt_titles)
+                    if k in va_keys and len(k.split()) >= 2 and k != canonical and k not in as_keys
+                    and (not self.aliases.known(k) or self.aliases.find(k) == canonical)}
+            if keys and any(self.aliases.find(k) != canonical for k in keys):
+                self.aliases.union({canonical} | keys, anchor=canonical)
+                learned += 1
+        return learned
 
     # --- lists ---
     @staticmethod
@@ -229,17 +259,25 @@ class YoitsuGateway:
 
         tasks = []
         for term in get_canonical_search_queries(q):
-            if source in ("all", "anime_sama"):
+            if source in ("all", "anime_sama") and source_health.usable("anime_sama"):
                 tasks.append(catalog_service._search_anime_sama(term))
-            if source in ("all", "voiranime"):
+            if source in ("all", "voiranime") and source_health.usable("voiranime"):
                 tasks.append(catalog_service._search_voiranime(term, group=False, cover_wait=0))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         entries = [e for res in results if isinstance(res, list) for e in self._entries(res)]
         entities = self.group(entries)
+        # The source's own score counts too: it matches names Nami does not know ("attaque des titans")
+        api_scores = {}
+        for res in results:
+            for item in res if isinstance(res, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("score"), (int, float)) and item.get("url"):
+                    ident = (item.get("source", "anime_sama"), slug_of(item["url"]))
+                    api_scores[ident] = max(api_scores.get(ident, 0.0), float(item["score"]))
 
         scored = []
         for e in entities:
             score = max(CatalogService._calc_relevance(t, q) for t in [e["title"], *e["alt_titles"]])
+            score = max([score, *(api_scores.get((s["source"], slug_of(s["url"])), 0.0) for s in e.get("sources") or [])])
             scored.append((score, e))
         if any(score >= 85.0 for score, _ in scored):
             scored = [(s, e) for s, e in scored if s >= 60.0]
@@ -666,10 +704,12 @@ class YoitsuGateway:
         }
 
     async def _voiranime_info(self, entries: List[Entry]) -> dict:
-        """VoirAnime seasons are built from the posts Nami knows (one post = one season x version).
+        """VoirAnime seasons: one per post (season x version), labelled by voiranime_API when it knows them.
 
-        voiranime_API's own season labels collapse posts ("2nd Season", "Final Season" and
-        spin-offs all become "Saison 1"), so its rows only provide the synopsis and cover.
+        voiranime_API groups a franchise's posts under the root post (base_url) and names each one
+        ("Saison 2", "BorN", "New", "Film"...). Its rows count only when they belong to this entity
+        (root or post among its members); posts it does not list keep a label read from their title,
+        and posts only it knows are added.
         """
         posts = sorted(entries, key=entry_rank)
         primary = posts[0]
@@ -677,18 +717,33 @@ class YoitsuGateway:
         member_keys = {title_key(split_version(e.title)[0]) for e in posts}
         member_slugs = {e.slug for e in posts}
 
+        rows = await self.get_info("voiranime", split_version(primary.title)[0])
+        own_rows = [r for r in rows if any(slug_of(u) in member_slugs for u in (
+            r.get("base_url"), r.get("_vostfr_url"), r.get("_vf_url"), r.get("url")) if u)]
+        row_label = {}
+        for r in own_rows:
+            label = (r.get("Saison") or "").strip()
+            for u in (r.get("_vostfr_url"), r.get("_vf_url")):
+                if label and u:
+                    row_label.setdefault(slug_of(u), label)
+
         labelled = []
         for e in posts:
             # Only the entity's own posts are evidence: "Fullmetal Alchemist: Brotherhood" stays "Saison 1"
             _, info = franchise_of(e.title, lambda root: root in member_keys)
-            labelled.append((e, info.get("season") or info.get("subtitle") or "Saison 1"))
+            labelled.append((e, row_label.get(e.slug) or info.get("season") or info.get("subtitle") or "Saison 1"))
         # With a "Hunter x Hunter (2011)" post, the un-yeared posts are the original series: they must
         # not merge into the other source's "Saison 1" (which may be the remake)
-        lineage = any(label.startswith("Remake ") for _, label in labelled)
+        lineage = any(label.startswith("Remake ") for _, label in labelled) or \
+            any((r.get("Saison") or "").startswith("Remake ") for r in own_rows)
+
+        def display_of(label: str) -> str:
+            return f"Original · {label}" if lineage and not label.startswith("Remake ") else label
 
         by_label: dict = {}
+        placed = set()
         for e, label in labelled:
-            display = f"Original · {label}" if lineage and not label.startswith("Remake ") else label
+            display = display_of(label)
             version = "vf" if e.is_vf else "vostfr"
             slot = by_label.setdefault(display, {"label": label, "display": display, "vostfr": None, "vf": None})
             if slot[version] and slot[version] != e.url:
@@ -696,9 +751,19 @@ class YoitsuGateway:
                 alt = f"{display} · {split_version(e.title)[0]}"
                 slot = by_label.setdefault(alt, {"label": label, "display": alt, "vostfr": None, "vf": None})
             slot[version] = slot[version] or e.url
+            placed.add(e.slug)
+        for r in own_rows:
+            label = (r.get("Saison") or "").strip()
+            if not label:
+                continue
+            slot = by_label.setdefault(display_of(label), {"label": label, "display": display_of(label), "vostfr": None, "vf": None})
+            for version, field in (("vostfr", "_vostfr_url"), ("vf", "_vf_url")):
+                url = r.get(field)
+                if url and not slot[version] and slug_of(url) not in placed and SOURCE_HOSTS["voiranime"] in (url_host(url) or ""):
+                    slot[version] = url
+                    placed.add(slug_of(url))
+        by_label = {k: v for k, v in by_label.items() if v["vostfr"] or v["vf"]}
 
-        rows = await self.get_info("voiranime", split_version(primary.title)[0])
-        own_rows = [r for r in rows if any(slug_of(u) in member_slugs for u in (r.get("_vostfr_url"), r.get("_vf_url"), r.get("url")) if u)]
         synopsis = next((r.get("synopsis") for r in own_rows if r.get("synopsis")), "")
         cover = next((r.get("cover") for r in own_rows if is_usable_cover(r.get("cover") or "") and is_trusted_cover(r["cover"], "voiranime")), "")
         cover = cover or next((e.cover for e in posts if is_usable_cover(e.cover) and is_trusted_cover(e.cover, "voiranime")), "")
@@ -876,6 +941,9 @@ class YoitsuGateway:
             if name and slug:
                 allowed[name].add(slug)
         order = ["ANIMESAMA", "VOIRANIME"] if primary == "anime_sama" else ["VOIRANIME", "ANIMESAMA"]
+        order = [name for name in order if source_health.usable("anime_sama" if name == "ANIMESAMA" else "voiranime")]
+        if not order:
+            return None
         return key_from_entity_id(details["id"]), sources[primary]["title"], allowed, order, primary
 
     def wrapper_status(self, eid: str, version: str = "vostfr") -> dict:

@@ -8,7 +8,8 @@ DEFAULT_SETTINGS = {
     "root_folder": "/downloads",
     "default_provider": "all",  # "all", "anime_sama", "voiranime"
     "download_quality": "1080p",
-    "max_concurrent_downloads": 3
+    "max_concurrent_downloads": 3,
+    "disabled_sources": []      # sources switched off by the user ("anime_sama", "voiranime")
 }
 
 class SettingsService:

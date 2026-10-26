@@ -8,6 +8,7 @@ downloads
 *.md
 *.bat
 *.sh
+*.ps1
 __pycache__
 *.pyc
 .vscode

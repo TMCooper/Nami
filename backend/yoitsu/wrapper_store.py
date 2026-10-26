@@ -81,9 +81,13 @@ def _observe(job: dict, url: str, response):
         query = parse_qs(parsed.query)
         if parsed.path.endswith("/getInfoAnime"):
             rows = response.json()
-            labels = {r.get("Saison") for r in rows if isinstance(r, dict) and r.get("Saison") not in (None, "Scans")} \
-                if isinstance(rows, list) else set()
+            rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+            labels = {r.get("Saison") for r in rows if r.get("Saison") not in (None, "Scans")}
             job["season_labels"] = job.get("season_labels", set()) | labels
+            # The source pages this anime is made of, as the API grouped them for YoitsuWrap
+            job.setdefault("members", set()).update(
+                u for r in rows for u in (r.get("base_url"), r.get("url"), r.get("_vostfr_url"), r.get("_vf_url"))
+                if isinstance(u, str) and u.startswith(("http://", "https://")))
         elif parsed.path.endswith("/getSpecificAnime"):
             label = (query.get("s") or [""])[0]
             if label and label != job.get("season"):
@@ -211,6 +215,7 @@ def snapshot_from_anime(anime, query: str, version: str, sources: List[str], bui
         "sources": sources,
         "built_at": built_at,
         "valid_until": min(expiries) if expiries else built_at + DEFAULT_LIFETIME,
+        "members": sorted(job.get("members") or ()),
         "anime": {
             "title": anime.get_title(),
             "cover": anime.get_cover(),
@@ -258,6 +263,7 @@ def build_with_wrapper(query: str, version: str, allowed: Dict[str, set], order:
     if job is not None:
         job["season_labels"] = set()   # the checks above were not YoitsuWrap's own calls
         job.pop("failures", None)
+        job.pop("members", None)
     anime = Anime.search_by_name(title=query, config=picked, version=version)
     if not isinstance(anime, Anime):
         return None

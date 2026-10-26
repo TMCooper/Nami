@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import shutil
 import base64
 import asyncio
@@ -983,14 +984,25 @@ async def clear_downloads():
 
 # --- In-App Updates & Component Management ---
 from backend.services.update_service import update_service, ANIME_SAMA_PATH, VOIRANIME_PATH
+from backend.services import self_update
+
+_BOOT_ID = f"{os.getpid()}-{time.time():.0f}"
+
+@router.get("/server/boot")
+async def server_boot():
+    # Changes on every start: the interface reloads once Nami has restarted after an update
+    return {"boot": _BOOT_ID}
 
 @router.get("/updates/check")
 async def check_updates():
+    # Nami itself first, then its APIs and YoitsuWrap
     # git ls-remote + PyPI lookups: several seconds of blocking I/O
-    return await asyncio.to_thread(update_service.check_all_updates)
+    nami, others = await asyncio.gather(asyncio.to_thread(self_update.status), asyncio.to_thread(update_service.check_all_updates))
+    return {"nami": nami, **others}
 
 @router.post("/updates/apply")
-async def apply_update(target: str = Query(..., description="'animesama', 'voiranime', 'yoitsuwrap', or 'all'")):
+async def apply_update(target: str = Query(..., pattern="^(nami|animesama|voiranime|yoitsuwrap|all)$",
+                                           description="'nami', 'animesama', 'voiranime', 'yoitsuwrap', or 'all' (the APIs and YoitsuWrap)")):
     # git pull, pip install and process restarts must not freeze the server
     return await asyncio.to_thread(_apply_update, target)
 
@@ -1017,7 +1029,16 @@ def _apply_update_locked(target: str) -> dict:
 
     if target in ["all", "yoitsuwrap"]:
         res_yw = update_service.update_yoitsuwrap()
+        # The running process keeps the old wrapper imported: Nami restarts to load the new one
+        res_yw["restart"] = res_yw.get("status") == "updated"
         results["yoitsuwrap"] = res_yw
 
-    return {"status": "completed", "results": results}
+    if target == "nami":
+        results["nami"] = self_update.apply()
+
+    restart = any(r.get("restart") for r in results.values())
+    if restart:
+        self_update.request_restart()
+    return {"status": "completed", "results": results, "restart": restart,
+            "host_rebuild": any(r.get("host_rebuild") for r in results.values())}
 

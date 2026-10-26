@@ -13,6 +13,7 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [updatingTarget, setUpdatingTarget] = useState(null);
   const [updateMsg, setUpdateMsg] = useState('');
+  const [updateFailed, setUpdateFailed] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -39,20 +40,65 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
       .finally(() => setIsCheckingUpdates(false));
   };
 
-  const handleApplyUpdate = (target) => {
+  const serverBoot = () => fetch('/api/server/boot', { cache: 'no-store' })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => data?.boot || null)
+    .catch(() => null);
+
+  // Nami restarts (in place, or rebuilt by the host): the page reloads once a new server answers
+  const reloadWhenRestarted = (bootBefore, deadline) => {
+    setTimeout(async () => {
+      const boot = await serverBoot();
+      if (boot && boot !== bootBefore) {
+        window.location.reload();
+      } else if (Date.now() < deadline) {
+        reloadWhenRestarted(bootBefore, deadline);
+      } else {
+        setUpdateFailed(true);
+        setUpdateMsg("Nami n'a pas redémarré : vérifiez le serveur (ou data/nami-update/last-update.log pour Docker).");
+        setUpdatingTarget(null);
+      }
+    }, 3000);
+  };
+
+  const handleApplyUpdate = async (target) => {
+    // Nami and YoitsuWrap updates restart the server
+    const restarts = target === 'nami' || target === 'yoitsuwrap' || target === 'all';
+    if (restarts && !window.confirm("Nami va redémarrer pour charger la nouvelle version : les lectures et téléchargements en cours seront interrompus. Continuer ?")) {
+      return;
+    }
     setUpdatingTarget(target);
-    setUpdateMsg('Mise à jour en cours...');
-    fetch(`/api/updates/apply?target=${target}`, { method: 'POST' })
-      .then((res) => res.json())
-      .then((data) => {
-        setUpdateMsg('Mise à jour terminée avec succès !');
+    setUpdateFailed(false);
+    setUpdateMsg(target === 'nami' ? 'Mise à jour de Nami en cours (dépendances, interface)…' : 'Mise à jour en cours…');
+    const bootBefore = await serverBoot();
+    try {
+      const res = await fetch(`/api/updates/apply?target=${target}`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      const results = Object.values(data.results || {});
+      const failure = !res.ok ? { message: data.detail || `Erreur ${res.status}` } : results.find((r) => r.status === 'error');
+      if (failure) {
+        setUpdateFailed(true);
+        setUpdateMsg(failure.message || 'Erreur lors de la mise à jour.');
+        setUpdatingTarget(null);
         checkUpdates();
-      })
-      .catch((err) => {
-        console.error("Error applying update:", err);
-        setUpdateMsg('Erreur lors de la mise à jour.');
-      })
-      .finally(() => setUpdatingTarget(null));
+        return;
+      }
+      if (data.restart || data.host_rebuild) {
+        setUpdateMsg(data.host_rebuild
+          ? "La machine hôte reconstruit Nami (quelques minutes) : la page se rechargera d'elle-même."
+          : 'Nami redémarre avec la nouvelle version : la page va se recharger…');
+        reloadWhenRestarted(bootBefore, Date.now() + (data.host_rebuild ? 30 : 3) * 60 * 1000);
+        return;
+      }
+      setUpdateMsg(results.map((r) => r.message).find(Boolean) || 'Mise à jour terminée.');
+      setUpdatingTarget(null);
+      checkUpdates();
+    } catch (err) {
+      console.error("Error applying update:", err);
+      setUpdateFailed(true);
+      setUpdateMsg('Erreur lors de la mise à jour.');
+      setUpdatingTarget(null);
+    }
   };
 
   const handleSave = () => {
@@ -206,7 +252,14 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
           </div>
 
           {updateMsg && (
-            <div style={{ padding: '8px 12px', background: 'rgba(46, 160, 67, 0.15)', border: '1px solid rgba(46, 160, 67, 0.3)', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', color: '#3FB950' }}>
+            <div role="status" style={{
+              padding: '8px 12px',
+              background: updateFailed ? 'rgba(255, 107, 107, 0.12)' : 'rgba(46, 160, 67, 0.15)',
+              border: `1px solid ${updateFailed ? 'rgba(255, 107, 107, 0.35)' : 'rgba(46, 160, 67, 0.3)'}`,
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '0.78rem',
+              color: updateFailed ? '#ff8a8a' : '#3FB950'
+            }}>
               {updateMsg}
             </div>
           )}
@@ -232,6 +285,12 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
                     <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                       Version locale : <code style={{ color: '#58A6FF' }}>{item.current_version}</code> {item.latest_version && item.latest_version !== item.current_version && <>→ Dernière : <code style={{ color: '#3FB950' }}>{item.latest_version}</code></>}
                     </span>
+                    {item.note && (
+                      <span style={{ fontSize: '0.72rem', color: '#E3B341', marginTop: '2px' }}>{item.note}</span>
+                    )}
+                    {item.restarts && !item.up_to_date && (
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '2px' }}>Nami redémarre après la mise à jour.</span>
+                    )}
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

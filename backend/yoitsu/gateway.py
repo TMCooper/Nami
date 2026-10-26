@@ -106,6 +106,7 @@ class YoitsuGateway:
         self._vf_probe: dict = {}
         self._probe_semaphore = asyncio.Semaphore(3)
         self._grouped: Dict[str, float] = {}   # VoirAnime title -> when its franchise was grouped
+        self._learned_fiches: set = set()      # (entity, fiche build time) whose members were learned
         self.wrapper = wrapper_store
 
     # --- plumbing ---
@@ -685,7 +686,7 @@ class YoitsuGateway:
             "sources": entity["sources"],
             "seasons": seasons,
             "_members": sorted(f"{m.source}:{m.slug}" for m in members),
-            "_complete": self.index.catalog_loaded,
+            "_complete": self.index.catalog_loaded and not (va_info or {}).get("partial"),
         }
         if anilist_task and media is None and not anilist_task.done():
             # AniList answered late (rate limit queue): patch the cached details when it does
@@ -758,6 +759,7 @@ class YoitsuGateway:
         member_slugs = {e.slug for e in posts}
 
         rows = await self.get_info("voiranime", split_version(primary.title)[0])
+        partial = not rows and source_health.usable("voiranime")   # no answer (slow first call): seasons guessed
         own_rows = [r for r in rows if any(slug_of(u) in member_slugs for u in (
             r.get("base_url"), r.get("_vostfr_url"), r.get("_vf_url"), r.get("url")) if u)]
         row_label = {}
@@ -807,7 +809,8 @@ class YoitsuGateway:
         synopsis = next((r.get("synopsis") for r in own_rows if r.get("synopsis")), "")
         cover = next((r.get("cover") for r in own_rows if is_usable_cover(r.get("cover") or "") and is_trusted_cover(r["cover"], "voiranime")), "")
         cover = cover or next((e.cover for e in posts if is_usable_cover(e.cover) and is_trusted_cover(e.cover, "voiranime")), "")
-        return {"seasons": list(by_label.values()), "synopsis": synopsis or "", "cover": cover, "history_title": history_title}
+        return {"seasons": list(by_label.values()), "synopsis": synopsis or "", "cover": cover, "history_title": history_title,
+                "partial": partial}
 
     @staticmethod
     def _merge_seasons(as_infos: list, va_info: Optional[dict]) -> list:
@@ -939,7 +942,31 @@ class YoitsuGateway:
         key, query, allowed, order, _ = job
         status = self.wrapper.ensure(key, version, query, allowed, order, force=refresh)
         snap = self.wrapper.get(key, version)
+        if snap and (details["id"], snap.get("built_at")) not in self._learned_fiches:
+            self._learned_fiches.add((details["id"], snap.get("built_at")))
+            self.learn_fiche_members(details["id"], snap.get("members") or [])   # a few lookups: on the loop (it schedules the save)
         return {**status, "version": version, "fiche": self._fiche_of(details, snap) if snap else None}
+
+    def learn_fiche_members(self, eid: str, urls: List[str]) -> int:
+        """The VoirAnime posts YoitsuWrap built this fiche from join its card: everywhere (catalogue, search,
+        history) the anime is then one card, like its fiche (« High School DxD OAV » stops being a card of its own).
+
+        Only posts the index knows; another Anime-Sama page never joins (each page is its own work).
+        """
+        canonical = self.aliases.find(key_from_entity_id(eid))
+        keys = set()
+        for url in urls:
+            if not self.valid_entry("voiranime", url):
+                continue
+            entry = self.index.entry(("voiranime", slug_of(url)))
+            if entry is None:
+                continue
+            # Its exact name too: listings key a post on it once known, whatever its siblings on the page
+            keys |= {self.index._cached_canonical(entry), _exact_key(entry.title)}
+        keys.discard(canonical)
+        if any(self.aliases.find(k) != canonical for k in keys):
+            self._learn(canonical, keys)
+        return len(keys)
 
     @staticmethod
     def _fiche_of(details: dict, snap: dict) -> dict:

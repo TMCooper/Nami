@@ -132,10 +132,20 @@ Nami/
 
 ### 1. Directement depuis l'application Web (Recommandé)
 Ouvrez l'icône **⚙️ Paramètres** en haut à droite :
-- Une section dédiée vérifie automatiquement l'état des versions de **AnimeSamaApi**, **VoirAnime_API** et **YoitsuWrap**.
-- Vous pouvez mettre à jour chaque composant individuellement ou cliquer sur **« Tout mettre à jour »**.
-- Le serveur recharge automatiquement les processus en tâche de fond.
+- Une section dédiée vérifie automatiquement l'état des versions de **Nami** lui-même, **AnimeSamaApi**, **VoirAnime_API** et **YoitsuWrap**.
+- Vous pouvez mettre à jour chaque composant individuellement ou cliquer sur **« Tout mettre à jour »** (APIs et wrapper).
+- Les APIs redémarrent seules ; une mise à jour de **Nami** ou de **YoitsuWrap** redémarre Nami, et la page se recharge d'elle-même.
 - **Sécurité des données garantie :** Aucun fichier utilisateur, historique ni téléchargement n'est modifié ou supprimé.
+
+#### Mise à jour de Nami avec Docker
+Le dépôt de Nami est privé et le conteneur n'a ni le dépôt git ni vos identifiants : c'est la machine hôte qui fait la mise à jour.
+Lancez une fois, dans le dossier de Nami (à côté de `docker-compose.yml`), l'outil qui reste à l'écoute de l'interface :
+- **Linux / Raspberry Pi** : `./updater.sh` (dans `tmux`/`screen`, ou en service systemd : exemple en tête du script)
+- **Windows** : `powershell -ExecutionPolicy Bypass -File .\updater.ps1`
+
+Il indique à Nami la version disponible et lance `rebuild` (git pull + nouvelle image) quand vous cliquez sur **« Mettre à jour »**. Journal de la dernière mise à jour : `data/nami-update/last-update.log`.
+
+Sans Docker (dépôt cloné), Nami se met à jour lui-même : avance rapide de sa branche (refusée si des fichiers ont été modifiés localement), dépendances, interface (npm), puis redémarrage.
 
 ### 2. Via les scripts de reconstruction
 Pour reconstruire proprement le conteneur Docker après de grosses modifications sans toucher à vos données :

@@ -290,3 +290,37 @@ def test_search_shows_one_card_per_franchise_like_yoitsuwrap(tmp_path, monkeypat
     other = _make_gateway(tmp_path / "other", monkeypatch, [], [{**HXD_ROWS[0], "base_url": "https://voir-anime.to/anime/x/"}], [])
     other.aliases.union = lambda *a, **k: pytest.fail("nothing to learn")
     asyncio.run(other.group_like_wrapper([Entry("voiranime", HXD, "High School DxD"), Entry("voiranime", HXD_BORN, "Z BorN")]))
+
+
+def test_the_posts_of_a_fiche_become_one_card(tmp_path, monkeypatch):
+    posts = [Entry("voiranime", HXD, "High School DxD"), Entry("voiranime", HXD_NEW, "High School DxD New"),
+             Entry("voiranime", HXD_BORN, "High School DxD BorN"),
+             Entry("voiranime", "https://voir-anime.to/anime/high-school-dxd-oav/", "High School DxD OAV"),
+             Entry("voiranime", "https://voir-anime.to/anime/high-school-dxd-born-yomigaeranai-fushichou/",
+                   "High School DxD BorN: Yomigaeranai Fushichou"),
+             Entry("voiranime", "https://voir-anime.to/anime/highschool-of-the-dead/", "Highschool of the Dead")]
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], [], catalog=posts)
+    assert len(gw.index.group(posts)) > 2
+
+    async def learn():
+        # What YoitsuWrap's getInfoAnime grouped for this fiche
+        return gw.learn_fiche_members("a-high-school-dxd", [p.url for p in posts[:5]] + ["https://anime-sama.to/catalogue/x"])
+    assert asyncio.run(learn()) > 0
+    cards = gw.index.group(posts)
+    assert [c["title"] for c in cards] == ["High School DxD", "Highschool of the Dead"]
+    assert asyncio.run(learn()) >= 0 and len(gw.index.group(list(reversed(posts)))) == 2   # any order, learned once
+
+
+def test_details_built_without_the_api_answer_are_redone(tmp_path, monkeypatch):
+    from backend.yoitsu import gateway as gateway_module
+    entries = [Entry("voiranime", HXD, "High School DxD")]
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], entries, catalog=entries)
+    monkeypatch.setattr(gateway_module.source_health, "usable", lambda source: True)
+    first = asyncio.run(gw.details("a-high-school-dxd"))
+    assert first and gw.store[("entity", "entity:high school dxd")]["_complete"] is False   # getInfoAnime gave nothing
+
+    async def rows(source, title):
+        return HXD_ROWS
+    monkeypatch.setattr(gw, "get_info", rows)
+    again = asyncio.run(gw.details("a-high-school-dxd"))
+    assert {s["label"] for s in again["seasons"]} == {"Saison 1", "New", "BorN"}

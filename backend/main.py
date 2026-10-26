@@ -181,6 +181,10 @@ async def lifespan(app: FastAPI):
     await source_health.close()
     for name in list(_submodule_processes):
         _stop_submodule(name)
+    from backend.services import self_update
+    if self_update.restart_requested():
+        # Everything is closed (APIs stopped, history saved): the updated code starts in this same process
+        self_update.exec_again()
 
 
 app = FastAPI(

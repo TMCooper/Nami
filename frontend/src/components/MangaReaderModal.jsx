@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { DEFAULT_PAGE_IMAGE } from '../utils/placeholders';
 import { 
   X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize, 
   Minimize, BookOpen, Layers, Check, Loader2, Bookmark 
@@ -177,7 +178,7 @@ export default function MangaReaderModal({
   const formatImageUrl = (url) => {
     if (!url) return '';
     if (url.startsWith('http')) {
-      return `/api/proxy/image?url=${encodeURIComponent(url)}`;
+      return `/api/img?url=${encodeURIComponent(url)}`;
     }
     return `/api/stream/local?file_path=${encodeURIComponent(url)}`;
   };
@@ -190,7 +191,7 @@ export default function MangaReaderModal({
         inset: 0,
         zIndex: 100,
         backgroundColor: '#0a0c10',
-        color: '#f0f6fc',
+        color: '#F1F1F1',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden'
@@ -203,7 +204,7 @@ export default function MangaReaderModal({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        background: 'rgba(13, 17, 23, 0.95)',
+        background: 'rgba(15, 15, 15, 0.95)',
         borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
         backdropFilter: 'blur(10px)',
         zIndex: 10
@@ -221,9 +222,9 @@ export default function MangaReaderModal({
               setCurrentChapterNum(num);
             }}
             style={{
-              background: '#21262d',
+              background: '#272727',
               color: '#fff',
-              border: '1px solid #30363d',
+              border: '1px solid #3F3F3F',
               padding: '6px 12px',
               borderRadius: '6px',
               fontSize: '0.85rem',
@@ -240,7 +241,7 @@ export default function MangaReaderModal({
 
           {/* Current Page Indicator Badge */}
           {totalPages > 0 && (
-            <span style={{ fontSize: '0.85rem', color: '#8b949e', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '0.85rem', color: '#AAAAAA', display: 'flex', alignItems: 'center', gap: '6px' }}>
               <Bookmark size={13} color="#58a6ff" />
               Page <strong style={{ color: '#58a6ff' }}>{currentPageIndex + 1}</strong> / {totalPages}
             </span>
@@ -394,7 +395,7 @@ export default function MangaReaderModal({
               onLoad={() => setIsImageLoading(false)}
               onError={(e) => {
                 setIsImageLoading(false);
-                e.target.src = 'https://via.placeholder.com/800x1200/0d1117/8b949e?text=Image+Indisponible';
+                if (e.target.src !== DEFAULT_PAGE_IMAGE) e.target.src = DEFAULT_PAGE_IMAGE;
               }}
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -480,10 +481,10 @@ export default function MangaReaderModal({
                     boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
                   }}
                   onError={(e) => {
-                    e.target.src = 'https://via.placeholder.com/800x1200/0d1117/8b949e?text=Image+Indisponible';
+                    if (e.target.src !== DEFAULT_PAGE_IMAGE) e.target.src = DEFAULT_PAGE_IMAGE;
                   }}
                 />
-                <span style={{ fontSize: '0.75rem', color: '#8b949e', marginTop: '6px' }}>
+                <span style={{ fontSize: '0.75rem', color: '#AAAAAA', marginTop: '6px' }}>
                   Page {idx + 1} / {totalPages}
                 </span>
               </div>

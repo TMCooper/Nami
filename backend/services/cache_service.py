@@ -1,18 +1,23 @@
 import os
-import json
 import time
 import random
 import re
 import threading
 import httpx
 from typing import Optional, List, Dict
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
+
+from backend.services.storage import load_json, save_json
+from backend.services.cover_utils import raw_cover_url, is_usable_cover, is_trusted_cover, client_cover_url
+from backend.services.http_headers import USER_AGENT, image_referer
+from backend.services.image_service import sniff_image_type, MIN_IMAGE_BYTES
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 ANIME_CACHE_DIR = os.path.join(CACHE_DIR, "animes")
 RECENT_FILE = os.path.join(CACHE_DIR, "recent.json")
-CATALOG_INDEX_FILE = os.path.join(CACHE_DIR, "catalog_index.json")
+DETAILS_TTL = 86400 * 3
+EPISODES_CACHE_PREFIX = "anime_sama_eps_"
 
 # Starter recommendations for instant discovery even before scraping full catalogs
 POPULAR_STARTER_ANIMES = [
@@ -33,166 +38,163 @@ POPULAR_STARTER_ANIMES = [
 def sanitize_cache_key(key: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_\-]', '_', key.strip().lower())
 
+def anime_identity(source: str, url: str, title: str = "") -> str:
+    """Stable key for one source entry: the URL slug survives domain changes and trailing slashes."""
+    slug = urlparse(url or "").path.rstrip("/").split("/")[-1].lower()
+    if slug:
+        return f"{source or 'anime_sama'}:{slug}"
+    return f"title:{(title or '').strip().lower()}"
+
 class CacheService:
     def __init__(self):
         os.makedirs(ANIME_CACHE_DIR, exist_ok=True)
+        self._recent_lock = threading.Lock()
         self.recent_data: Dict[str, List[dict]] = self._load_recent()
 
     def _load_recent(self) -> dict:
-        if os.path.exists(RECENT_FILE):
-            try:
-                with open(RECENT_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"[CacheService] Error reading recent file: {e}")
-        return {}
+        data = load_json(RECENT_FILE, dict)
+        return data if isinstance(data, dict) else {}
 
     def _save_recent(self):
         try:
-            with open(RECENT_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.recent_data, f, indent=2, ensure_ascii=False)
+            save_json(RECENT_FILE, self.recent_data)
         except Exception as e:
             print(f"[CacheService] Error saving recent file: {e}")
 
     # --- Anime Details Caching ---
+    def _details_path(self, source: str, key: str) -> str:
+        return os.path.join(ANIME_CACHE_DIR, f"{source}_{sanitize_cache_key(key)}.json")
+
     def get_anime_details(self, source: str, key: str) -> Optional[dict]:
-        safe_key = f"{source}_{sanitize_cache_key(key)}.json"
-        path = os.path.join(ANIME_CACHE_DIR, safe_key)
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Cache valid for 3 days or perpetual
-                    if time.time() - data.get("_cached_at", 0) < 86400 * 3:
-                        return data.get("content")
-            except Exception as e:
-                print(f"[CacheService] Error reading cache {safe_key}: {e}")
+        data = load_json(self._details_path(source, key), dict)
+        # Cache valid for 3 days
+        if isinstance(data, dict) and time.time() - data.get("_cached_at", 0) < DETAILS_TTL:
+            return data.get("content")
         return None
 
-    def save_anime_details(self, source: str, key: str, content: dict):
-        safe_key = f"{source}_{sanitize_cache_key(key)}.json"
-        path = os.path.join(ANIME_CACHE_DIR, safe_key)
+    def save_anime_details(self, source: str, key: str, content):
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"_cached_at": time.time(), "content": content}, f, indent=2, ensure_ascii=False)
+            save_json(self._details_path(source, key), {"_cached_at": time.time(), "content": content})
         except Exception as e:
-            print(f"[CacheService] Error saving cache {safe_key}: {e}")
+            print(f"[CacheService] Error saving cache {source}:{key}: {e}")
 
     # --- Recent Viewed & Searched Animes ---
     def add_recent_anime(self, user_id: str, anime: dict):
         if not anime or not anime.get("title"):
             return
         uid = user_id or "default"
-        if uid not in self.recent_data:
-            self.recent_data[uid] = []
-
-        user_recents = self.recent_data[uid]
-        # Remove existing if duplicate
-        filtered = [a for a in user_recents if a.get("title", "").lower() != anime.get("title", "").lower()]
-        
-        cover_val = anime.get("cover", "")
-        if not cover_val or "placeholder" in cover_val:
-            title = anime.get("title", "")
-            try:
-                from backend.services.yoitsu_service import yoitsu_service
-                cov = yoitsu_service.get_anime_cover(title)
-                if cov:
-                    if "voir-anime" in cov or "voiranime" in cov:
-                        from urllib.parse import quote
-                        cover_val = f"/api/proxy/image?url={quote(cov, safe='')}"
-                    else:
-                        cover_val = cov
-            except Exception:
-                pass
+        source = anime.get("source", "anime_sama")
+        identity = anime_identity(source, anime.get("url", ""), anime.get("title", ""))
+        title_lower = anime.get("title", "").lower()
+        cover = anime.get("cover", "")
 
         entry = {
             "title": anime.get("title"),
             "url": anime.get("url", ""),
-            "source": anime.get("source", "anime_sama"),
-            "cover": cover_val,
+            "source": source,
+            # Raw upstream URL; placeholders are never stored
+            "cover": raw_cover_url(cover) if is_usable_cover(cover) else "",
             "viewed_at": time.time()
         }
-        filtered.insert(0, entry)
-        self.recent_data[uid] = filtered[:24]  # Keep up to 24
+        with self._recent_lock:
+            user_recents = self.recent_data.get(uid, [])
+            # Remove existing if duplicate (same entry or same title)
+            filtered = [
+                a for a in user_recents
+                if a.get("title", "").lower() != title_lower
+                and anime_identity(a.get("source", "anime_sama"), a.get("url", ""), a.get("title", "")) != identity
+            ]
+            filtered.insert(0, entry)
+            self.recent_data[uid] = filtered[:24]  # Keep up to 24
         self._save_recent()
 
+    @staticmethod
+    def _has_good_cover(entry: dict) -> bool:
+        cover = entry.get("cover", "")
+        return is_usable_cover(cover) and is_trusted_cover(cover, entry.get("source", "anime_sama"))
+
     def get_recent_animes(self, user_id: str) -> List[dict]:
+        """Recent entries with browser-loadable covers. Missing covers are repaired in the background (see catalog_service)."""
         uid = user_id or "default"
-        recents = self.recent_data.get(uid, [])
-        updated = False
-        for a in recents:
-            cov = a.get("cover", "")
-            if not cov or "placeholder" in cov:
-                title = a.get("title", "")
-                try:
-                    from backend.services.yoitsu_service import yoitsu_service
-                    new_cov = yoitsu_service.get_anime_cover(title)
-                    if new_cov:
-                        if "voir-anime" in new_cov or "voiranime" in new_cov:
-                            from urllib.parse import quote
-                            a["cover"] = f"/api/proxy/image?url={quote(new_cov, safe='')}"
-                        else:
-                            a["cover"] = new_cov
-                        updated = True
-                except Exception:
-                    pass
-        if updated:
+        return [
+            {**a, "cover": client_cover_url(a.get("cover", "")) if self._has_good_cover(a) else ""}
+            for a in list(self.recent_data.get(uid, []))
+        ]
+
+    def recents_missing_cover(self, user_id: str) -> List[dict]:
+        return [a for a in list(self.recent_data.get(user_id or "default", [])) if not self._has_good_cover(a)]
+
+    def set_recent_cover(self, user_id: str, source: str, url: str, title: str, cover: str):
+        if not is_usable_cover(cover):
+            return
+        identity = anime_identity(source, url, title)
+        changed = False
+        with self._recent_lock:
+            for a in self.recent_data.get(user_id or "default", []):
+                if anime_identity(a.get("source", "anime_sama"), a.get("url", ""), a.get("title", "")) == identity:
+                    a["cover"] = raw_cover_url(cover)
+                    changed = True
+        if changed:
             self._save_recent()
-        return recents
 
     # --- Random / Starter Animes ---
     def get_random_animes(self, count: int = 12) -> List[dict]:
         pool = list(POPULAR_STARTER_ANIMES)
-        
-        # Also include any cached animes
-        try:
-            for fname in os.listdir(ANIME_CACHE_DIR):
-                if fname.endswith(".json"):
-                    fpath = os.path.join(ANIME_CACHE_DIR, fname)
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        item = json.load(f).get("content", {})
-                        if item.get("title"):
-                            pool.append({
-                                "title": item["title"],
-                                "url": item.get("url", ""),
-                                "source": item.get("source", "anime_sama"),
-                                "cover": item.get("cover", "")
-                            })
-        except Exception:
-            pass
 
-        # Deduplicate by title
+        # Also include cached anime details (one bad file must not stop the scan)
+        try:
+            names = os.listdir(ANIME_CACHE_DIR)
+        except OSError:
+            names = []
+        for fname in names:
+            if not fname.endswith(".json") or fname.startswith(EPISODES_CACHE_PREFIX):
+                continue
+            data = load_json(os.path.join(ANIME_CACHE_DIR, fname), dict)
+            item = data.get("content") if isinstance(data, dict) else None
+            if isinstance(item, dict) and item.get("title"):
+                pool.append({
+                    "title": item["title"],
+                    "url": item.get("url", ""),
+                    "source": item.get("source", "anime_sama"),
+                    "cover": item.get("cover", "")
+                })
+
+        # Deduplicate by title and by source entry (e.g. "L'Attaque des Titans" and "Shingeki no Kyojin" share one URL)
         seen = set()
         deduped = []
         for a in pool:
-            t = a["title"].lower()
-            if t not in seen:
-                seen.add(t)
-                deduped.append(a)
+            keys = {f"title:{a['title'].lower()}", anime_identity(a.get("source"), a.get("url", ""), a["title"])}
+            if not keys & seen:
+                seen |= keys
+                good = is_trusted_cover(a.get("cover", ""), a.get("source", "anime_sama"))
+                deduped.append({**a, "cover": client_cover_url(a.get("cover", "")) if good else ""})
 
         random.shuffle(deduped)
         return deduped[:count]
 
     def _save_local_cover_async(self, cover_url: str, anime_path: str):
         """Asynchronously fetches and saves the cover image to cover.jpg inside anime folder."""
+        target = raw_cover_url(cover_url)
+        if not target.startswith(("http://", "https://")):
+            return
+
         def _fetch_and_save():
             try:
                 dest = os.path.join(anime_path, "cover.jpg")
                 if os.path.exists(dest) and os.path.getsize(dest) > 1000:
                     return
-                target = cover_url
-                if "/api/proxy/image?url=" in target:
-                    target = target.split("/api/proxy/image?url=")[-1]
-                headers = {"User-Agent": "Mozilla/5.0"}
-                if "voir-anime" in target:
-                    headers["Referer"] = "https://voir-anime.to/"
-                elif "anime-sama" in target:
-                    headers["Referer"] = "https://anime-sama.fr/"
+                headers = {"User-Agent": USER_AGENT}
+                referer = image_referer(target)
+                if referer:
+                    headers["Referer"] = referer
                 with httpx.Client(timeout=10.0, follow_redirects=True) as client:
                     resp = client.get(target, headers=headers)
-                    if resp.status_code == 200 and len(resp.content) > 1000:
-                        with open(dest, "wb") as f:
+                    # Only real images: an HTML error page must not become cover.jpg
+                    if resp.status_code == 200 and len(resp.content) >= MIN_IMAGE_BYTES and sniff_image_type(resp.content[:32]):
+                        tmp_dest = f"{dest}.tmp"
+                        with open(tmp_dest, "wb") as f:
                             f.write(resp.content)
+                        os.replace(tmp_dest, dest)
             except Exception:
                 pass
 
@@ -212,35 +214,22 @@ class CacheService:
         clean_name = display_title.lower().strip()
 
         # 2. History database
-        hist_file = os.path.join(DATA_DIR, "history.json")
-        if os.path.exists(hist_file):
-            try:
-                with open(hist_file, "r", encoding="utf-8") as f:
-                    hdata = json.load(f)
-                    for user_records in hdata.values():
-                        if isinstance(user_records, dict):
-                            for atitle, rec in user_records.items():
-                                if atitle.lower().strip() == clean_name and rec.get("cover"):
-                                    cov_url = rec["cover"]
-                                    self._save_local_cover_async(cov_url, anime_path)
-                                    return cov_url
-            except Exception:
-                pass
+        from backend.services.history_service import history_service
+        # Snapshots: this runs in a worker thread while requests may add titles to the live dicts
+        for user_records in list(history_service.history.values()):
+            if isinstance(user_records, dict):
+                for atitle, rec in list(user_records.items()):
+                    cov_url = rec.get("cover", "") if isinstance(rec, dict) else ""
+                    if atitle.lower().strip() == clean_name and is_usable_cover(cov_url):
+                        self._save_local_cover_async(cov_url, anime_path)
+                        return client_cover_url(cov_url)
 
-        # 3. VoirAnime covers.json
-        va_covers = os.path.join(DATA_DIR, "submodules", "voiranime_API", "data", "covers.json")
-        if not os.path.exists(va_covers):
-            va_covers = os.path.join(os.path.dirname(DATA_DIR), "voiranime_API", "data", "covers.json")
-        if os.path.exists(va_covers):
-            try:
-                with open(va_covers, "r", encoding="utf-8") as f:
-                    vdata = json.load(f)
-                    for t, c in vdata.items():
-                        if c and (t.lower().strip() == clean_name or clean_name in t.lower() or t.lower() in clean_name):
-                            self._save_local_cover_async(c, anime_path)
-                            return f"/api/proxy/image?url={quote(c, safe='')}"
-            except Exception:
-                pass
+        # 3. Cover registry (exact normalized title, never a substring match)
+        from backend.services.cover_registry import cover_registry
+        reg_cover = cover_registry.lookup(display_title)
+        if reg_cover:
+            self._save_local_cover_async(reg_cover, anime_path)
+            return client_cover_url(reg_cover)
 
         # 4. Popular starter list
         for starter in POPULAR_STARTER_ANIMES:
@@ -260,6 +249,27 @@ class CacheService:
         return ""
 
     # --- Scan Local Downloaded Media on Disk ---
+    @staticmethod
+    def _video_files(folder: str) -> List[dict]:
+        episodes = []
+        for ep_file in sorted(os.listdir(folder)):
+            # yt-dlp's ".temp.mp4" is a download still being finished
+            if not ep_file.lower().endswith(('.mp4', '.mkv', '.webm')) or ".temp." in ep_file.lower():
+                continue
+            full_ep_path = os.path.join(folder, ep_file)
+            m = re.search(r'\d+', ep_file)
+            episodes.append({
+                "num": str(int(m.group())) if m else "1",
+                "filename": ep_file,
+                "file_path": full_ep_path,
+                "thumbnail": f"/api/stream/thumbnail?file_path={quote(full_ep_path)}",
+                "size_mb": round(os.path.getsize(full_ep_path) / (1024 * 1024), 1),
+                "is_scan": False,
+                "is_downloaded": True
+            })
+        episodes.sort(key=lambda e: int(e["num"]))
+        return episodes
+
     def scan_downloaded_library(self, root_folder: str) -> List[dict]:
         candidate_bases = [
             os.path.join(root_folder, "nami", "anime"),
@@ -268,10 +278,13 @@ class CacheService:
 
         results = []
         seen_titles = set()
+        seen_bases = set()
 
         for base_dir in candidate_bases:
-            if not os.path.exists(base_dir):
+            real_base = os.path.normcase(os.path.realpath(base_dir))
+            if not os.path.exists(base_dir) or real_base in seen_bases:
                 continue
+            seen_bases.add(real_base)
 
             try:
                 for anime_folder in os.listdir(base_dir):
@@ -280,8 +293,6 @@ class CacheService:
                         continue
 
                     display_title = anime_folder.replace("_", " ")
-                    if display_title.lower() in seen_titles:
-                        continue
 
                     cover = self._find_anime_cover(display_title, anime_path)
                     seasons_found = []
@@ -328,38 +339,33 @@ class CacheService:
                                     "episodes": chapters_found
                                 })
                         else:
-                            # Standard video season folder
-                            episodes_found = []
-                            for ep_file in sorted(os.listdir(season_path)):
-                                if ep_file.lower().endswith(('.mp4', '.mkv', '.webm')):
-                                    full_ep_path = os.path.join(season_path, ep_file)
-                                    file_size_mb = round(os.path.getsize(full_ep_path) / (1024 * 1024), 1)
-                                    
-                                    # Extract episode number
-                                    ep_num = "1"
-                                    m = re.search(r'\d+', ep_file)
-                                    if m:
-                                        ep_num = str(int(m.group()))
-
-                                    episodes_found.append({
-                                        "num": ep_num,
-                                        "filename": ep_file,
-                                        "file_path": full_ep_path,
-                                        "thumbnail": f"/api/stream/thumbnail?file_path={quote(full_ep_path)}",
-                                        "size_mb": file_size_mb,
-                                        "is_scan": False,
-                                        "is_downloaded": True
+                            # Video season folder: episodes in it (old downloads) and in its version
+                            # folders (YoitsuWrap downloads: <season>/vostfr/1.mp4, <season>/vf/1.mp4)
+                            places = [(season_path, display_season, season_folder)]
+                            for version, suffix in (("vostfr", ""), ("vf", " VF")):
+                                version_path = os.path.join(season_path, version)
+                                if os.path.isdir(version_path):
+                                    places.append((version_path, f"{display_season}{suffix}", f"{season_folder}/{version}"))
+                            for place, name, folder in places:
+                                episodes_found = self._video_files(place)
+                                if episodes_found:
+                                    seasons_found.append({
+                                        "season_name": name,
+                                        "folder": folder,
+                                        "is_scans": False,
+                                        "episodes": episodes_found
                                     })
 
-                            if episodes_found:
-                                seasons_found.append({
-                                    "season_name": display_season,
-                                    "folder": season_folder,
-                                    "is_scans": False,
-                                    "episodes": episodes_found
-                                })
-
-                    if seasons_found:
+                    if seasons_found and display_title.lower() in seen_titles:
+                        known = next(r for r in results if r["anime_title"].lower() == display_title.lower())
+                        known["seasons"] += seasons_found
+                        for key, scans in (("total_episodes", False), ("total_chapters", True)):
+                            known[key] += sum(len(s["episodes"]) for s in seasons_found if bool(s.get("is_scans")) == scans)
+                        known["total_size_mb"] = round(known["total_size_mb"] + sum(
+                            ep.get("size_mb", 0) for s in seasons_found for ep in s["episodes"]), 1)
+                        known["has_videos"] = known["total_episodes"] > 0
+                        known["has_scans"] = known["total_chapters"] > 0
+                    elif seasons_found:
                         seen_titles.add(display_title.lower())
                         total_eps = sum(len(s["episodes"]) for s in seasons_found if not s.get("is_scans"))
                         total_chaps = sum(len(s["episodes"]) for s in seasons_found if s.get("is_scans"))

@@ -13,10 +13,13 @@ import {
   X,
   Filter,
   HardDrive,
-  Wifi
+  Wifi,
+  Loader2
 } from 'lucide-react';
+import WideThumb from './WideThumb';
+import { formatRelativeDate } from '../utils/animes';
 
-export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode }) {
+export default function HistoryView({ currentUser, resumingKey = null, onSelectAnime, onResumeEpisode }) {
   const [historyData, setHistoryData] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [searchFilter, setSearchFilter] = useState('');
@@ -93,16 +96,26 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  const formatRelativeDate = (timestamp) => {
-    if (!timestamp) return 'Récemment';
-    const now = Date.now() / 1000;
-    const diffSec = Math.max(0, now - timestamp);
-    if (diffSec < 60) return "À l'instant";
-    if (diffSec < 3600) return `Il y a ${Math.floor(diffSec / 60)} min`;
-    if (diffSec < 86400) return `Il y a ${Math.floor(diffSec / 3600)} h`;
-    if (diffSec < 172800) return "Hier";
-    return `Il y a ${Math.floor(diffSec / 86400)} jours`;
-  };
+  // Same path as the home shelf: full season list, auto-advance, direct seek (no prompt); « Revoir » starts at 0
+  const resumeKeyOf = (video) => `${video.animeTitle}:${video.epKey}`;
+  const play = (video) => onResumeEpisode({
+    key: resumeKeyOf(video),
+    anime_title: video.animeTitle,
+    season: video.season,
+    episode_num: video.epId,
+    episode_title: '',
+    embed_url: video.embed_url,
+    file_path: video.file_path,
+    position_sec: video.watched ? 0 : video.position_sec,
+    cover: video.animeCover,
+    anime: video.anime,
+    is_next: false
+  });
+
+  // Linked records open their entity directly, others go through the title lookup
+  const openAnime = (video) => onSelectAnime(
+    video.anime ? { ...video.anime, cover: video.animeCover } : { title: video.animeTitle, cover: video.animeCover }
+  );
 
   // Flatten history items into individual watched video entries (YouTube style)
   const flattenedVideos = useMemo(() => {
@@ -113,7 +126,10 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
       const episodes = animeRecord.episodes || {};
 
       Object.entries(episodes).forEach(([epKey, epData]) => {
-        const [season, epId] = epKey.split(':');
+        // Season names may contain ':' (the episode id never does)
+        const sep = epKey.lastIndexOf(':');
+        const season = sep >= 0 ? epKey.slice(0, sep) : '';
+        const epId = sep >= 0 ? epKey.slice(sep + 1) : epKey;
         const pos = epData.position_sec || 0;
         const dur = epData.duration_sec || 1440;
         const watched = epData.watched || false;
@@ -134,7 +150,8 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
           progress_percent: Math.min(100, Math.max(0, progress)),
           last_watched_at: lastWatched,
           file_path: filePath,
-          embed_url: embedUrl
+          embed_url: embedUrl,
+          anime: animeRecord.anime || null
         });
       });
     });
@@ -148,7 +165,8 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
     return flattenedVideos.filter((video) => {
       if (searchFilter.trim()) {
         const query = searchFilter.toLowerCase().trim();
-        const matchTitle = video.animeTitle.toLowerCase().includes(query);
+        const matchTitle = video.animeTitle.toLowerCase().includes(query)
+          || (video.anime?.title || '').toLowerCase().includes(query);
         const matchEp = `épisode ${video.epId}`.includes(query) || video.season.toLowerCase().includes(query);
         if (!matchTitle && !matchEp) return false;
       }
@@ -307,9 +325,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
         }}>
           {filteredVideos.map((video, idx) => {
             const hasLocal = Boolean(video.file_path);
-            const thumbUrl = hasLocal
-              ? `/api/stream/thumbnail?file_path=${encodeURIComponent(video.file_path)}`
-              : (video.animeCover || 'https://via.placeholder.com/320x180/0d1117/8b949e?text=Episode');
+            const isResuming = resumingKey === resumeKeyOf(video); // waiting for its season list
 
             return (
               <div
@@ -317,11 +333,12 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                 className="surface-card animate-fade-in"
                 style={{
                   display: 'flex',
+                  flexWrap: 'wrap',
                   gap: '18px',
                   padding: '12px',
                   borderRadius: 'var(--radius-md)',
                   border: '1px solid var(--border-color)',
-                  background: 'linear-gradient(145deg, rgba(22, 27, 34, 0.85), rgba(13, 17, 23, 0.85))',
+                  background: 'linear-gradient(145deg, rgba(15, 15, 15, 0.85), rgba(15, 15, 15, 0.85))',
                   alignItems: 'center',
                   transition: 'var(--transition)',
                   position: 'relative'
@@ -337,6 +354,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
               >
                 {/* 16:9 Thumbnail Box (Classic YouTube Preview) */}
                 <div
+                  className="history-thumb"
                   style={{
                     position: 'relative',
                     width: '240px',
@@ -344,41 +362,19 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                     height: '135px',
                     borderRadius: 'var(--radius-sm)',
                     overflow: 'hidden',
-                    background: '#0D1117',
+                    background: '#0F0F0F',
                     cursor: 'pointer',
                     flexShrink: 0
                   }}
-                  onClick={() => onPlayEpisode(
-                    video.animeTitle,
-                    video.season,
-                    {
-                      num: video.epId,
-                      title: `Épisode ${video.epId}`,
-                      embed_url: video.embed_url,
-                      file_path: video.file_path
-                    },
-                    [{ num: video.epId, title: `Épisode ${video.epId}`, embed_url: video.embed_url, file_path: video.file_path }],
-                    video.animeCover,
-                    video.position_sec,
-                    video.file_path
-                  )}
+                  onClick={() => play(video)}
                 >
-                  <img
-                    src={thumbUrl}
+                  <WideThumb
+                    sources={[
+                      video.file_path && `/api/stream/thumbnail?file_path=${encodeURIComponent(video.file_path)}`,
+                      ...(video.anime?.wide_images || [])
+                    ].filter(Boolean)}
+                    cover={video.animeCover}
                     alt={video.animeTitle}
-                    onError={(e) => {
-                      if (video.animeCover && e.target.src !== video.animeCover) {
-                        e.target.src = video.animeCover;
-                      } else {
-                        e.target.src = 'https://via.placeholder.com/320x180/0d1117/8b949e?text=Episode';
-                      }
-                    }}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                      transition: 'transform 0.3s ease'
-                    }}
                   />
 
                   {/* Play Overlay */}
@@ -465,7 +461,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                 </div>
 
                 {/* Metadata Column (YouTube Style) */}
-                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{ flex: 1, minWidth: '220px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <div>
                       <h3
@@ -477,20 +473,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                           cursor: 'pointer',
                           lineHeight: 1.3
                         }}
-                        onClick={() => onPlayEpisode(
-                          video.animeTitle,
-                          video.season,
-                          {
-                            num: video.epId,
-                            title: `Épisode ${video.epId}`,
-                            embed_url: video.embed_url,
-                            file_path: video.file_path
-                          },
-                          [{ num: video.epId, title: `Épisode ${video.epId}`, embed_url: video.embed_url, file_path: video.file_path }],
-                          video.animeCover,
-                          video.position_sec,
-                          video.file_path
-                        )}
+                        onClick={() => play(video)}
                       >
                         {video.animeTitle} — {video.season} • Épisode {video.epId}
                       </h3>
@@ -498,10 +481,10 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
                         <span
                           style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', cursor: 'pointer', fontWeight: 600 }}
-                          onClick={() => onSelectAnime({ title: video.animeTitle, source: 'anime_sama', url: '' })}
+                          onClick={() => openAnime(video)}
                           title="Ouvrir la fiche de la série"
                         >
-                          {video.animeTitle}
+                          {video.anime?.title || video.animeTitle}
                         </span>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>•</span>
                         <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
@@ -545,7 +528,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                   </div>
 
                   {/* Actions Row */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
                     <button
                       className="btn btn-primary"
                       style={{
@@ -558,22 +541,11 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                         gap: '6px',
                         fontWeight: 700
                       }}
-                      onClick={() => onPlayEpisode(
-                        video.animeTitle,
-                        video.season,
-                        {
-                          num: video.epId,
-                          title: `Épisode ${video.epId}`,
-                          embed_url: video.embed_url,
-                          file_path: video.file_path
-                        },
-                        [{ num: video.epId, title: `Épisode ${video.epId}`, embed_url: video.embed_url, file_path: video.file_path }],
-                        video.animeCover,
-                        video.position_sec,
-                        video.file_path
-                      )}
+                      disabled={isResuming}
+                      aria-busy={isResuming}
+                      onClick={() => play(video)}
                     >
-                      <Play size={13} fill="#fff" />
+                      {isResuming ? <Loader2 className="animate-spin" size={13} /> : <Play size={13} fill="#fff" />}
                       {video.position_sec > 10 && !video.watched ? "Reprendre" : "Revoir"}
                     </button>
 
@@ -589,7 +561,7 @@ export default function HistoryView({ currentUser, onSelectAnime, onPlayEpisode 
                     <button
                       className="btn btn-secondary"
                       style={{ padding: '6px 10px', fontSize: '0.78rem' }}
-                      onClick={() => onSelectAnime({ title: video.animeTitle, source: 'anime_sama', url: '' })}
+                      onClick={() => openAnime(video)}
                       title="Voir la fiche complète de l'anime"
                     >
                       <ExternalLink size={13} />

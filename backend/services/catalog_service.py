@@ -1,17 +1,28 @@
-import os
-import sys
 import json
 import re
+import time
 import asyncio
 import httpx
-from urllib.parse import quote
+from urllib.parse import urljoin, urlparse
 from typing import Optional, List, Dict
 from bs4 import BeautifulSoup
+from backend.services import api_state
 from backend.services.cache_service import cache_service
-from backend.services.update_service import VOIRANIME_PATH
+from backend.services.cover_registry import cover_registry
+from backend.services.cover_utils import (
+    client_cover_url, raw_cover_url, is_usable_cover, is_trusted_cover, extract_page_cover
+)
 
 AS_API_BASE = "http://127.0.0.1:5000"
 VA_API_BASE = "http://127.0.0.1:8000"
+
+COVER_MISS_TTL = 1800          # seconds before retrying a page whose cover could not be found
+COVER_SCRAPE_CONCURRENCY = 6
+BACKGROUND_COVER_CONCURRENCY = 2
+SEARCH_COVER_WAIT = 5.0        # seconds a search waits for missing covers; the rest finish in background
+
+# voiranime_API /resolve returns the kind under "type"; the player and downloads expect these values
+RESOLVER_TYPES = {"hls": "m3u8", "m3u8": "m3u8", "mp4": "mp4"}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -58,13 +69,55 @@ def get_base_anime_title(title: str) -> str:
     return t.strip()
 
 
+def host_label(url: str) -> str:
+    """'https://vidmoly.net/embed-x.html' -> 'vidmoly'."""
+    host = (urlparse(url).hostname or "").lower()
+    parts = [p for p in host.split(".") if p and p != "www"]
+    return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "lecteur")
+
+
+# Hosts that resolve to a direct stream first (ansembed first, as in AnimeSamaApi); hosts that
+# only give an embed page (uqload, ...) after; sibnet last (often unavailable)
+_ANIME_SAMA_HOST_ORDER = (
+    ("ansembed", "movembed"), ("vidmoly",), ("smoothpre", "vidhide", "streamwish"), ("sendvid",),
+    ("voe",), ("mytv", "voembed"), ("embed4me", "lpayer"),
+)
+
+
+def anime_sama_player_rank(url: str) -> int:
+    u = url.lower()
+    for rank, hosts in enumerate(_ANIME_SAMA_HOST_ORDER):
+        if any(h in u for h in hosts):
+            return rank
+    return 99 if "sibnet" in u else 50
+
+
 class CatalogService:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True)
         self._is_updating = False
         self._update_message = "Catalogue au repos"
+        self._cover_misses: Dict[str, float] = {}
+        self._cover_inflight: Dict[str, asyncio.Task] = {}
+        self._cover_semaphore = asyncio.Semaphore(COVER_SCRAPE_CONCURRENCY)
+        self._background_cover_semaphore = asyncio.Semaphore(BACKGROUND_COVER_CONCURRENCY)
+        self._background_tasks: set = set()
+        self._repairing_recents: set = set()
+
+    def _spawn(self, coro):
+        """Fire-and-forget task that is kept referenced until it finishes."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def get_update_status(self) -> dict:
+        status = await self._update_status()
+        # Lets the UI reload the catalogue once the scraper APIs finished starting
+        status["apis_ready"] = api_state.all_ready()
+        return status
+
+    async def _update_status(self) -> dict:
         if self._is_updating:
             return {"is_updating": True, "message": self._update_message, "source": "all"}
 
@@ -114,106 +167,135 @@ class CatalogService:
             self._is_updating = False
 
     def _format_cover_url(self, cover: str) -> str:
-        if not cover:
-            return ""
-        if cover.startswith("/api/proxy/image"):
-            return cover
-        if "voir-anime" in cover or "voiranime" in cover:
-            return f"/api/proxy/image?url={quote(cover, safe='')}"
-        return cover
+        return client_cover_url(cover)
 
     def _save_voiranime_cached_cover(self, title: str, cover_url: str):
         if not title or not cover_url:
             return
-        covers_path = os.path.join(VOIRANIME_PATH, "data", "covers.json")
-        try:
-            cov_data = {}
-            if os.path.exists(covers_path):
-                with open(covers_path, "r", encoding="utf-8") as f:
-                    cov_data = json.load(f)
-            cov_data[title] = cover_url
-            clean_title = re.sub(r'\s*\((?:VF|VOSTFR)\)\s*', '', title, flags=re.IGNORECASE).strip()
-            cov_data[clean_title] = cover_url
-            with open(covers_path, "w", encoding="utf-8") as f:
-                json.dump(cov_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"[CatalogService] Error saving cover to covers.json: {e}")
+        cover_registry.register(title, cover_url, "voiranime")
+        clean_title = re.sub(r'\s*\((?:VF|VOSTFR)\)\s*', '', title, flags=re.IGNORECASE).strip()
+        if clean_title != title:
+            cover_registry.register(clean_title, cover_url, "voiranime")
 
     def _get_voiranime_cached_cover(self, title: str) -> str:
         if not title:
             return ""
-        covers_path = os.path.join(VOIRANIME_PATH, "data", "covers.json")
-        if os.path.exists(covers_path):
-            try:
-                with open(covers_path, "r", encoding="utf-8") as f:
-                    cov_data = json.load(f)
-                    if title in cov_data and cov_data[title]:
-                        return cov_data[title]
-                    clean_title = re.sub(r'\s*\((?:VF|VOSTFR)\)\s*', '', title, flags=re.IGNORECASE).strip()
-                    if clean_title in cov_data and cov_data[clean_title]:
-                        return cov_data[clean_title]
-                    # Also try case-insensitive lookup
-                    lower_clean = clean_title.lower()
-                    for k, v in cov_data.items():
-                        if k.lower().strip() == lower_clean and v:
-                            return v
-            except Exception:
-                pass
-        return ""
+        cover = cover_registry.lookup(title, "voiranime")
+        if cover:
+            return cover
+        clean_title = re.sub(r'\s*\((?:VF|VOSTFR)\)\s*', '', title, flags=re.IGNORECASE).strip()
+        return cover_registry.lookup(clean_title, "voiranime") if clean_title != title else ""
 
-    async def _resolve_voiranime_cover(self, name: str, url: str) -> str:
-        # 1. Fast cache lookup
+    def _known_voiranime_cover(self, name: str) -> str:
         cov = self._get_voiranime_cached_cover(name)
         if cov:
             return cov
         base_name = get_base_anime_title(name)
         if base_name and base_name != name:
-            cov = self._get_voiranime_cached_cover(base_name)
-            if cov:
-                return cov
+            return self._get_voiranime_cached_cover(base_name)
+        return ""
 
-        # 2. Check YoitsuWrap source API
-        try:
-            from backend.services.yoitsu_service import yoitsu_service
-            yoitsu_cov = yoitsu_service.get_anime_cover(name)
-            if not yoitsu_cov and base_name and base_name != name:
-                yoitsu_cov = yoitsu_service.get_anime_cover(base_name)
-            if yoitsu_cov:
-                self._save_voiranime_cached_cover(name, yoitsu_cov)
-                self._save_voiranime_cached_cover(base_name, yoitsu_cov)
-                return yoitsu_cov
-        except Exception:
-            pass
+    def _cover_missed_recently(self, url: str) -> bool:
+        return self._cover_misses.get(url, 0) > time.monotonic()
 
-        # 3. Check if detail cache has it
+    async def _resolve_voiranime_cover(self, name: str, url: str, background: bool = False) -> str:
+        """Cover of one VoirAnime entry, looked up by its exact page URL (never by fuzzy title).
+
+        Concurrent callers for the same URL share one scrape; background scrapes (home catalogue,
+        repairs) use their own smaller semaphore so they never delay interactive requests.
+        """
+        # 1. Fast cache lookup
+        cov = self._known_voiranime_cover(name)
+        if cov or not url:
+            return cov
+
+        # 2. Check if detail cache has it
         cached_detail = cache_service.get_anime_details("voiranime", f"voiranime:{url}")
-        if cached_detail and cached_detail.get("cover"):
-            raw_c = cached_detail["cover"]
-            if "/api/proxy/image?url=" in raw_c:
-                raw_c = raw_c.split("/api/proxy/image?url=")[-1]
+        if cached_detail and is_usable_cover(cached_detail.get("cover", "")) and is_trusted_cover(cached_detail["cover"], "voiranime"):
+            raw_c = raw_cover_url(cached_detail["cover"])
             self._save_voiranime_cached_cover(name, raw_c)
             return raw_c
 
-        # 4. Direct HTML scrape of og:image / summary image
-        try:
-            r = await self.client.get(url, timeout=3.5, headers={"Referer": "https://voir-anime.to/"})
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, 'html.parser')
-                og = soup.find('meta', property='og:image')
-                if og and og.get('content'):
-                    c_url = og['content']
-                    self._save_voiranime_cached_cover(name, c_url)
-                    return c_url
-                sum_img = soup.select_one('.summary_image img')
-                if sum_img:
-                    c_url = sum_img.get('src') or sum_img.get('data-src') or ""
+        # 3. Direct HTML scrape of og:image / summary image, with a negative cache for pages without one
+        if self._cover_missed_recently(url):
+            return ""
+        task = self._cover_inflight.get(url)
+        if task is None:
+            task = self._spawn(self._scrape_voiranime_cover(name, url, background))
+            self._cover_inflight[url] = task
+            task.add_done_callback(lambda _t, u=url: self._cover_inflight.pop(u, None))
+        # shield: a cancelled request must not cancel the scrape other callers wait on
+        return await asyncio.shield(task)
+
+    async def _scrape_voiranime_cover(self, name: str, url: str, background: bool) -> str:
+        semaphore = self._background_cover_semaphore if background else self._cover_semaphore
+        async with semaphore:
+            # Another task may have found it (or given up) while this one was queued
+            cov = self._known_voiranime_cover(name)
+            if cov or self._cover_missed_recently(url):
+                return cov
+            try:
+                r = await self.client.get(url, timeout=4.0, headers={"Referer": "https://voir-anime.to/"})
+                if r.status_code == 200:
+                    c_url = extract_page_cover(BeautifulSoup(r.text, 'html.parser'), str(r.url))
                     if c_url:
                         self._save_voiranime_cached_cover(name, c_url)
                         return c_url
-        except Exception:
-            pass
-
+            except Exception:
+                pass
+        self._cover_misses[url] = time.monotonic() + COVER_MISS_TTL
         return ""
+
+    async def _fill_missing_voiranime_covers(self, items: list, limit: int, wait_seconds: float):
+        """Resolves missing covers concurrently; whatever is not done after wait_seconds finishes in background."""
+        # Recently failed URLs give their slot to the next entries
+        missing = [
+            m for m in items
+            if not is_usable_cover(m.get("cover", ""))
+            and not self._get_voiranime_cached_cover(m.get("title", ""))
+            and not self._cover_missed_recently(m.get("url", ""))
+        ][:limit]
+        if not missing:
+            return
+        background = wait_seconds <= 0
+        tasks = {
+            self._spawn(self._resolve_voiranime_cover(m.get("title", ""), m.get("url", ""), background=background)): m
+            for m in missing
+        }
+        if background:
+            return
+        done, _pending = await asyncio.wait(list(tasks), timeout=wait_seconds)
+        for task in done:
+            if not task.cancelled() and task.exception() is None and task.result():
+                tasks[task]["cover"] = task.result()
+
+    async def resolve_cover(self, source: str, url: str, title: str = "", background: bool = False) -> str:
+        if source == "voiranime":
+            return await self._resolve_voiranime_cover(title, url, background=background)
+        slug = url.rstrip("/").split("/")[-1] if url else ""
+        return f"https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/{slug}.jpg" if slug else ""
+
+    async def _repair_details_cover(self, cache_key: str, details: dict, url: str):
+        cover = await self._resolve_voiranime_cover(details.get("title", ""), url, background=True)
+        if cover:
+            cache_service.save_anime_details("voiranime", cache_key, {**details, "cover": cover})
+
+    async def repair_recent_covers(self, user_id: str):
+        """Background repair of recents without a usable cover (was done synchronously in GET /api/catalog/recent)."""
+        uid = user_id or "default"
+        if uid in self._repairing_recents:
+            return
+        self._repairing_recents.add(uid)
+        try:
+            for entry in cache_service.recents_missing_cover(uid)[:12]:
+                source = entry.get("source", "anime_sama")
+                cover = await self.resolve_cover(source, entry.get("url", ""), entry.get("title", ""), background=True)
+                if cover:
+                    cache_service.set_recent_cover(uid, source, entry.get("url", ""), entry.get("title", ""), cover)
+        except Exception as e:
+            print(f"[CatalogService] Recent covers repair error: {e}")
+        finally:
+            self._repairing_recents.discard(uid)
 
     @staticmethod
     def _calc_relevance(title: str, query: str) -> float:
@@ -234,6 +316,22 @@ class CatalogService:
         matched_tokens = [w for w in q_tokens if w in t_lower]
         return (len(matched_tokens) / len(q_tokens)) * 70.0
 
+    @staticmethod
+    def _raw_voiranime_entries(items: list) -> list:
+        """One item per VoirAnime post (season / VF variant kept apart): grouping is done by the Yoitsu index."""
+        out, seen = [], set()
+        for it in items:
+            name = it.get("title", it.get("name", ""))
+            url = it.get("link", it.get("lien", it.get("url", "")))
+            if not name or not url or url in seen:
+                continue
+            seen.add(url)
+            cover = it.get("cover", "")
+            if not (is_usable_cover(cover) and is_trusted_cover(cover, "voiranime")):
+                cover = ""
+            out.append({"title": name, "url": url, "cover": cover})
+        return out
+
     def _group_voiranime_entries(self, items: list) -> list:
         """Unifies individual season/variant entries (e.g. S2, VF, Specials) into their parent Anime object."""
         grouped = {}
@@ -241,6 +339,9 @@ class CatalogService:
             name = it.get("title", it.get("name", ""))
             url = it.get("link", it.get("lien", it.get("url", "")))
             cover = it.get("cover", "")
+            # Junk (data:, relative) or legacy Anime-Sama art counts as missing so it gets re-resolved
+            if not (is_usable_cover(cover) and is_trusted_cover(cover, "voiranime")):
+                cover = ""
             if not name or not url:
                 continue
             base_title = get_base_anime_title(name)
@@ -326,7 +427,7 @@ class CatalogService:
                             title = item.get("title", "")
                             link = item.get("lien", item.get("link", ""))
                             cover = item.get("cover", "")
-                            if not cover and link:
+                            if not is_usable_cover(cover) and link:
                                 slug = link.rstrip("/").split("/")[-1]
                                 cover = f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg"
                             if title and link:
@@ -335,7 +436,9 @@ class CatalogService:
                                     "title": title,
                                     "source": "anime_sama",
                                     "url": link,
-                                    "cover": cover
+                                    "cover": client_cover_url(cover),
+                                    # AnimeSamaApi scores with the alternative titles and Anime-Sama's own search
+                                    "score": item.get("score")
                                 })
             else:
                 resp = await self.client.get(f"{AS_API_BASE}/api/loadBaseAnimeData")
@@ -346,21 +449,22 @@ class CatalogService:
                             title = item.get("title", "")
                             link = item.get("link", item.get("lien", ""))
                             slug = link.rstrip("/").split("/")[-1] if link else ""
-                            cover = item.get("cover") or (f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg" if slug else "")
+                            cover = item.get("cover") if is_usable_cover(item.get("cover") or "") else ""
+                            cover = cover or (f"https://cdn.statically.io/gh/Anime-Sama/IMG/img/contenu/{slug}.jpg" if slug else "")
                             if title and link:
                                 results.append({
                                     "id": f"as:{link}",
                                     "title": title,
                                     "source": "anime_sama",
                                     "url": link,
-                                    "cover": cover
+                                    "cover": client_cover_url(cover)
                                 })
         except Exception as e:
             print(f"[CatalogService] Error querying AnimeSama API: {e}")
 
         return results
 
-    async def _search_voiranime(self, query: str = "") -> list:
+    async def _search_voiranime(self, query: str = "", group: bool = True, cover_wait: float = SEARCH_COVER_WAIT) -> list:
         results = []
         q_clean = query.strip()
         try:
@@ -375,25 +479,10 @@ class CatalogService:
                     matches = data.get("results", data) if isinstance(data, dict) else data
                     if isinstance(matches, list):
                         # Unify sub-seasons (e.g. Season II, Specials, VF) under parent Anime
-                        grouped_matches = self._group_voiranime_entries(matches)
+                        grouped_matches = self._group_voiranime_entries(matches) if group else self._raw_voiranime_entries(matches)
 
-                        # Resolve missing covers concurrently
-                        missing_items = [
-                            m for m in grouped_matches
-                            if not m.get("cover") and not self._get_voiranime_cached_cover(m.get("title", ""))
-                        ]
-                        if missing_items:
-                            tasks = [
-                                self._resolve_voiranime_cover(
-                                    item.get("title", ""),
-                                    item.get("link", item.get("lien", item.get("url", "")))
-                                )
-                                for item in missing_items[:15]
-                            ]
-                            resolved_covers = await asyncio.gather(*tasks, return_exceptions=True)
-                            for idx, cov in enumerate(resolved_covers):
-                                if isinstance(cov, str) and cov:
-                                    missing_items[idx]["cover"] = cov
+                        # Resolve missing covers concurrently (bounded wait, the rest completes in background)
+                        await self._fill_missing_voiranime_covers(grouped_matches, limit=15, wait_seconds=cover_wait)
 
                         for item in grouped_matches:
                             name = item.get("title", item.get("name", ""))
@@ -426,25 +515,10 @@ class CatalogService:
                             raw_items = [{"title": k, "link": v} for k, v in list(cat_dict.items())[:300]]
 
                     # Unify sub-seasons (e.g. S2, VF, Specials) under parent Anime
-                    grouped_items = self._group_voiranime_entries(raw_items)
+                    grouped_items = self._group_voiranime_entries(raw_items) if group else self._raw_voiranime_entries(raw_items)
 
-                    # Concurrently resolve missing covers in base catalogue
-                    missing_items = [
-                        m for m in grouped_items
-                        if not m.get("cover") and not self._get_voiranime_cached_cover(m.get("title", ""))
-                    ]
-                    if missing_items:
-                        tasks = [
-                            self._resolve_voiranime_cover(
-                                item.get("title", ""),
-                                item.get("link", item.get("lien", item.get("url", "")))
-                            )
-                            for item in missing_items[:20]
-                        ]
-                        resolved_covers = await asyncio.gather(*tasks, return_exceptions=True)
-                        for idx, cov in enumerate(resolved_covers):
-                            if isinstance(cov, str) and cov:
-                                missing_items[idx]["cover"] = cov
+                    # Home catalogue: never wait on cover scraping, covers show up on the next load
+                    await self._fill_missing_voiranime_covers(grouped_items, limit=20, wait_seconds=0)
 
                     for item in grouped_items:
                         name = item.get("title", item.get("name", ""))
@@ -466,36 +540,60 @@ class CatalogService:
 
         return results
 
-    async def get_details(self, url: str, source: str, refresh: bool = False, user_id: str = "default") -> dict:
+    async def get_details(self, url: str, source: str, refresh: bool = False, user_id: str = "default", track_recent: bool = True) -> dict:
         cache_key = f"{source}:{url}"
+        res = None
         if not refresh:
             cached = cache_service.get_anime_details(source, cache_key)
             if cached:
                 if source == "voiranime":
                     eps = cached.get("episodes", [])
-                    needs_refresh = False
                     if not eps or "num" not in eps[0] or not isinstance(eps[0].get("num"), int):
-                        needs_refresh = True
-                    cover_val = cached.get("cover", "")
-                    if "voir-anime" in cover_val and not cover_val.startswith("/api/proxy/image"):
-                        cached["cover"] = self._format_cover_url(cover_val)
-                    if needs_refresh:
                         cached = None
-                if cached:
-                    cache_service.add_recent_anime(user_id, cached)
-                    return cached
+                    elif track_recent and not (is_usable_cover(cached.get("cover", "")) and is_trusted_cover(cached["cover"], "voiranime")):
+                        # An empty cover used to stay frozen for the whole cache lifetime: repair it in
+                        # background (never make the modal wait), it shows up on the next opening
+                        self._spawn(self._repair_details_cover(cache_key, cached, url))
+                res = cached
 
-        res = {}
-        if source == "anime_sama":
-            res = await self._get_details_anime_sama(url)
-        elif source == "voiranime":
-            res = await self._get_details_voiranime(url)
+        if not res:
+            if source == "anime_sama":
+                res = await self._get_details_anime_sama(url)
+            elif source == "voiranime":
+                res = await self._get_details_voiranime(url)
+            if res and res.get("title"):
+                cache_service.save_anime_details(source, cache_key, res)
 
-        if res and res.get("title"):
-            cache_service.save_anime_details(source, cache_key, res)
+        if not res:
+            return {}
+        if res.get("title") and track_recent:
             cache_service.add_recent_anime(user_id, res)
+        return self._client_details(res)
 
-        return res
+    @staticmethod
+    def _client_details(details: dict) -> dict:
+        """Details payload for the browser: covers are stored raw and rewritten here."""
+        out = {**details, "cover": client_cover_url(details.get("cover", ""))}
+        if isinstance(details.get("seasons"), list):
+            out["seasons"] = [
+                {**s, "cover": client_cover_url(s["cover"])} if isinstance(s, dict) and "cover" in s else s
+                for s in details["seasons"]
+            ]
+        return out
+
+    @staticmethod
+    def _anime_sama_page_metadata(soup) -> tuple:
+        """Synopsis, alternative titles and genres of an Anime-Sama catalogue page."""
+        synopsis = ""
+        node = soup.find(id="synopsisText") or soup.select_one(".oe-synopsis p") or soup.select_one(".oe-synopsis")
+        if node:
+            for extra in node.find_all(["button", "a"]):
+                extra.decompose()
+            synopsis = re.sub(r'\s+', ' ', node.get_text(" ", strip=True)).strip()
+        alt_node = soup.find(id="titreAlter")
+        alt_titles = [t.strip() for t in alt_node.get_text(" ", strip=True).split(",") if t.strip()] if alt_node else []
+        genres = [g.get_text(" ", strip=True) for g in soup.select(".oe-genres .genre-pill") if g.get_text(strip=True)]
+        return synopsis, alt_titles, genres
 
     async def _get_details_anime_sama(self, url: str) -> dict:
         ALIASES = {
@@ -513,13 +611,17 @@ class CatalogService:
         try:
             fetch_url = target_url.replace("anime-sama.fr", "anime-sama.to")
             resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code == 200:
+            if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
+                # Stale mirror domains redirect to the home page: retry on the main domain
+                fetch_url = f"https://anime-sama.to/catalogue/{slug}/"
+                resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and "/catalogue/" in str(resp.url):
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 h1 = soup.find('h1', id='titreOeuvre') or soup.find('h1')
                 anime_name = h1.text.strip() if h1 and h1.text.strip() else slug.replace("-", " ").title()
 
-                og_img = soup.find('meta', property='og:image')
-                cover = og_img.get('content') if og_img and og_img.get('content') else default_cover
+                cover = extract_page_cover(soup, str(resp.url)) or default_cover
+                synopsis, alt_titles, genres = self._anime_sama_page_metadata(soup)
 
                 pattern = re.compile(r'panneau(?:Anime|Film|Scan|Visual)\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)')
                 matches = pattern.findall(resp.text)
@@ -541,7 +643,9 @@ class CatalogService:
                         "title": anime_name,
                         "url": target_url,
                         "cover": cover,
-                        "synopsis": "",
+                        "synopsis": synopsis,
+                        "alt_titles": alt_titles,
+                        "genres": genres,
                         "source": "anime_sama",
                         "seasons": seasons
                     }
@@ -556,7 +660,7 @@ class CatalogService:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
                     anime_name = data[0].get("title", title.title())
-                    cover = data[0].get("cover", default_cover)
+                    cover = data[0].get("cover") if is_usable_cover(data[0].get("cover") or "") else default_cover
                     seasons = []
                     for item in data:
                         s_name = item.get("Saison", "Saison 1")
@@ -588,23 +692,21 @@ class CatalogService:
         title = url.rstrip("/").split("/")[-1].replace("-", " ").title()
         cover = self._get_voiranime_cached_cover(title)
         synopsis = ""
+        page_scraped = False
 
         # Scrape anime page on VoirAnime to get cover and synopsis directly
         try:
             page_resp = await self.client.get(url, timeout=8.0, headers={"Referer": "https://voir-anime.to/"})
             if page_resp.status_code == 200:
+                page_scraped = True
                 soup = BeautifulSoup(page_resp.text, 'html.parser')
-                og_img = soup.find('meta', property='og:image')
-                if og_img and og_img.get('content'):
-                    cover = og_img['content']
-                if not cover:
-                    sum_img = soup.select_one('.summary_image img')
-                    if sum_img:
-                        cover = sum_img.get('src') or sum_img.get('data-src') or ""
+                cover = extract_page_cover(soup, str(page_resp.url)) or cover
 
-                desc_p = soup.select_one('.description-summary p')
-                if desc_p:
-                    synopsis = desc_p.text.strip()
+                # Every paragraph: on sequel pages the first one is often just "Saison 2 de ..."
+                summary = soup.select_one('.description-summary')
+                if summary:
+                    paragraphs = [p.get_text(" ", strip=True) for p in summary.find_all('p')]
+                    synopsis = "\n\n".join(p for p in paragraphs if p)
         except Exception as e:
             print(f"[CatalogService] VoirAnime page scraping warning: {e}")
 
@@ -614,27 +716,28 @@ class CatalogService:
             if info_resp.status_code == 200:
                 info_data = info_resp.json()
                 if isinstance(info_data, list) and len(info_data) > 0:
-                    if not cover and info_data[0].get("cover"):
-                        cover = info_data[0].get("cover", "")
+                    if not is_usable_cover(cover) and is_usable_cover(info_data[0].get("cover") or ""):
+                        cover = info_data[0]["cover"]
                     if len(info_data) > 1:
                         for s in info_data:
                             s_nom = s.get("Saison", "Saison 1")
                             s_url = s.get("url", url)
-                            s_cov = s.get("cover", cover)
+                            s_cov = s.get("cover") or cover
                             seasons.append({
                                 "name": s_nom,
                                 "url": s_url,
                                 "raw_link": s_url,
-                                "cover": self._format_cover_url(s_cov)
+                                "cover": raw_cover_url(s_cov)
                             })
         except Exception:
             pass
 
+        cover = raw_cover_url(cover) if is_usable_cover(cover) and is_trusted_cover(cover, "voiranime") else ""
         if cover:
-            raw_c = cover.split("/api/proxy/image?url=")[-1] if "/api/proxy/image?url=" in cover else cover
-            self._save_voiranime_cached_cover(title, raw_c)
-
-        cover = self._format_cover_url(cover)
+            self._save_voiranime_cached_cover(title, cover)
+        elif page_scraped:
+            # The page itself has no cover: do not scrape it again for every follow-up request
+            self._cover_misses[url] = time.monotonic() + COVER_MISS_TTL
 
         try:
             resp = await self.client.get(f"{VA_API_BASE}/episodes", params={"anime_url": url})
@@ -775,6 +878,165 @@ class CatalogService:
 
         return episodes
 
+    @staticmethod
+    def _voiranime_player_rank(label: str) -> int:
+        kl = label.lower()
+        if "sibnet" in kl: return 999
+        if "mytv" in kl or "voembed" in kl: return 1
+        if "vidmoly" in kl: return 2
+        if "sendvid" in kl: return 3
+        if "voe" in kl: return 4
+        if "streamtape" in kl or "stape" in kl: return 5
+        return 10
+
+    @classmethod
+    def parse_voiranime_players(cls, page_html: str) -> list:
+        """Every usable player of a VoirAnime episode page, best first (sibnet and internal players skipped)."""
+        players = []
+        sources_match = re.search(r'var\s+thisChapterSources\s*=\s*(\{.*?\});', page_html, re.DOTALL)
+        if sources_match:
+            try:
+                src_dict = json.loads(sources_match.group(1))
+            except ValueError:
+                src_dict = {}
+            for label in sorted(src_dict.keys(), key=cls._voiranime_player_rank):
+                src_match = re.search(r'src=["\']([^"\']+)["\']', str(src_dict[label]))
+                if not src_match or "sibnet" in label.lower():
+                    continue
+                embed = src_match.group(1).replace("\\/", "/")
+                if embed.startswith("//"):
+                    embed = "https:" + embed
+                if "voiranime" not in embed and "sibnet" not in embed.lower():
+                    players.append({"host": label, "embed_url": embed})
+        else:
+            soup = BeautifulSoup(page_html, 'html.parser')
+            for ifr in soup.find_all('iframe'):
+                src = ifr.get('src') or ""
+                if src.startswith("//"):
+                    src = "https:" + src
+                if src and "voiranime" not in src and "sibnet" not in src.lower():
+                    players.append({"host": host_label(src), "embed_url": src})
+        return players
+
+    async def extract_voiranime_players(self, episode_url: str) -> list:
+        try:
+            page_resp = await self.client.get(episode_url, headers={**HEADERS, "Referer": "https://voir-anime.to/"}, timeout=8.0)
+            if page_resp.status_code == 200:
+                return self.parse_voiranime_players(page_resp.text)
+        except Exception as e:
+            print(f"[CatalogService] VoirAnime iframe extraction error: {e}")
+        return []
+
+    async def fetch_anime_sama_players(self, season_url: str, version: str = "vostfr", refresh: bool = False) -> list:
+        """Episodes of an Anime-Sama season with every player (lecteur) of episodes.js, best first.
+
+        Players are resolved only when played, so the list loads fast and the UI can switch host.
+        """
+        base = re.sub(r"/(?:vostfr|vf)/?$", "", season_url.rstrip("/"))
+        target_url = f"{base}/{version}"
+        cache_key = f"as_players:{target_url}"
+        if not refresh:
+            cached = cache_service.get_anime_details("anime_sama_eps", cache_key)
+            if isinstance(cached, list) and cached:
+                return cached
+
+        lecteurs = await self._anime_sama_lecteurs(target_url) or {}
+        episodes = []
+        count = max((len(urls) for urls in lecteurs.values()), default=0)
+        for idx in range(count):
+            players = [
+                {"host": host_label(urls[idx]), "embed_url": urls[idx], "lecteur": name}
+                for name, urls in lecteurs.items() if idx < len(urls) and urls[idx]
+            ]
+            players.sort(key=lambda p: anime_sama_player_rank(p["embed_url"]))
+            if players:
+                episodes.append({
+                    "num": idx + 1,
+                    "title": f"Épisode {idx + 1}",
+                    "embed_url": players[0]["embed_url"],
+                    "stream_url": None,
+                    "players": players,
+                })
+        if episodes:
+            cache_service.save_anime_details("anime_sama_eps", cache_key, episodes)
+        return episodes
+
+    async def _anime_sama_lecteurs(self, target_url: str) -> Optional[dict]:
+        """{lecteur name: [embed url per episode]} from the season's episodes.js.
+
+        {} means the season page has no episodes (e.g. no VF); None means it could not be checked.
+        """
+        try:
+            resp = await self.client.get(target_url, timeout=10.0)
+            if resp.status_code == 404:
+                return {}
+            if resp.status_code != 200 or "/catalogue/" not in str(resp.url):
+                return None
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            script_tag = soup.find("script", src=lambda s: s and "episodes.js" in s)
+            if not script_tag:
+                return {}
+            js_src = script_tag.get("src", "").strip("\"'")
+            js_url = urljoin(f"{str(resp.url).rstrip('/')}/", js_src)
+            js_resp = await self.client.get(js_url, headers={"Referer": target_url}, timeout=10.0)
+            if js_resp.status_code != 200:
+                return None
+            lecteurs = {}
+            for name, content in re.findall(r"var\s+(eps\w+)\s*=\s*\[(.*?)\];", js_resp.text, re.DOTALL):
+                urls = re.findall(r"""['"](https?://[^'"]+)['"]""", content)
+                if urls:
+                    lecteurs[name] = urls
+            return lecteurs
+        except Exception as e:
+            print(f"[CatalogService] episodes.js scrape error: {e}")
+            return None
+
+    async def fetch_anime_sama_page(self, url: str, refresh: bool = False) -> Optional[dict]:
+        """Metadata of an Anime-Sama catalogue page (h1, synopsis, alternative titles, genres, seasons).
+
+        The getInfoAnime contract has no alternative titles / genres, and its titles are
+        ASCII-normalized: the page h1 is the legacy history / download key. Cached per slug.
+        """
+        slug = url.rstrip("/").split("/")[-1].lower()
+        cache_key = f"as_page:{slug}"
+        if not refresh:
+            cached = cache_service.get_anime_details("anime_sama_page", cache_key)
+            if isinstance(cached, dict) and cached.get("title"):
+                return cached
+        try:
+            resp = await self.client.get(url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
+                resp = await self.client.get(f"https://anime-sama.to/catalogue/{slug}/", timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200 or f"/catalogue/{slug}" not in str(resp.url).lower():
+                return None
+        except Exception as e:
+            print(f"[CatalogService] Anime-Sama page fetch error: {e}")
+            return None
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        h1 = soup.find('h1', id='titreOeuvre')
+        if not h1 or not h1.get_text(strip=True):
+            return None
+        synopsis, alt_titles, genres = self._anime_sama_page_metadata(soup)
+        base_clean = str(resp.url).rstrip("/")
+        seasons, seen = [], set()
+        pattern = re.compile(r'panneau(?:Anime|Film|Scan|Visual)\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']\s*\)')
+        for nom, lien in pattern.findall(re.sub(r"/\*.*?\*/", "", resp.text, flags=re.DOTALL)):
+            if nom.lower() != "nom" and lien.lower() != "url" and nom not in seen:
+                seen.add(nom)
+                seasons.append({"label": nom, "url": f"{base_clean}/{lien.lstrip('/')}"})
+        page = {
+            "slug": slug,
+            "title": h1.get_text(" ", strip=True),
+            "url": base_clean,
+            "cover": extract_page_cover(soup, str(resp.url)),
+            "synopsis": synopsis,
+            "alt_titles": alt_titles,
+            "genres": genres,
+            "seasons": seasons,
+        }
+        cache_service.save_anime_details("anime_sama_page", cache_key, page)
+        return page
+
     async def resolve_stream(self, embed_url: str, source: str = "anime_sama") -> dict:
         result = {"stream_url": None, "stream_type": None, "iframe_url": embed_url, "host": None}
 
@@ -783,64 +1045,55 @@ class CatalogService:
 
         target_embed = embed_url
 
+        # Already a stream (YoitsuWrap gives resolved, yt-dlp checked hls/mp4 links): nothing to resolve
+        try:
+            parsed = urlparse(embed_url)
+            direct = parsed.path.lower()
+            host = parsed.hostname
+        except ValueError:
+            return result
+        if embed_url.startswith(("http://", "https://")) and direct.endswith((".m3u8", ".mp4")):
+            result.update(stream_url=embed_url, stream_type="m3u8" if direct.endswith(".m3u8") else "mp4", host=host)
+            return result
+
         # Special handling for VoirAnime: episode URL is a webpage, extract the real video player iframe!
         if "voir-anime.to" in target_embed or source == "voiranime":
-            try:
-                page_resp = await self.client.get(target_embed, headers={**HEADERS, "Referer": "https://voir-anime.to/"}, timeout=8.0)
-                if page_resp.status_code == 200:
-                    page_html = page_resp.text
-                    sources_match = re.search(r'var\s+thisChapterSources\s*=\s*(\{.*?\});', page_html, re.DOTALL)
-                    if sources_match:
-                        src_dict = json.loads(sources_match.group(1))
-                        # Preferred video player order: voembed/mytv, vidmoly, sendvid, voe, streamtape
-                        def player_rank(k):
-                            kl = k.lower()
-                            if "sibnet" in kl: return 999
-                            if "mytv" in kl or "voembed" in kl: return 1
-                            if "vidmoly" in kl: return 2
-                            if "sendvid" in kl: return 3
-                            if "voe" in kl: return 4
-                            if "streamtape" in kl or "stape" in kl: return 5
-                            return 10
-
-                        sorted_keys = sorted(src_dict.keys(), key=player_rank)
-                        for k in sorted_keys:
-                            if "sibnet" in k.lower():
-                                continue
-                            ifr_code = src_dict[k]
-                            src_match = re.search(r'src=["\']([^"\']+)["\']', ifr_code)
-                            if src_match:
-                                extracted = src_match.group(1).replace(r"\/", "/")
-                                if "voiranime" not in extracted:
-                                    target_embed = extracted
-                                    result["iframe_url"] = extracted
-                                    result["host"] = k
-                                    break
-                    else:
-                        soup = BeautifulSoup(page_html, 'html.parser')
-                        for ifr in soup.find_all('iframe'):
-                            src = ifr.get('src')
-                            if src and "voiranime" not in src and "sibnet" not in src.lower():
-                                target_embed = src
-                                result["iframe_url"] = src
-                                break
-            except Exception as e:
-                print(f"[CatalogService] VoirAnime iframe extraction error: {e}")
+            players = await self.extract_voiranime_players(target_embed)
+            if players:
+                target_embed = players[0]["embed_url"]
+                result["iframe_url"] = target_embed
+                result["host"] = players[0]["host"]
 
         # Now resolve the clean target embed via VoirAnime resolver to obtain direct m3u8 or mp4
         try:
             resp = await self.client.get(f"{VA_API_BASE}/resolve", params={"embed_url": target_embed}, timeout=10.0)
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("status") == "success" and data.get("stream_url"):
-                    result["stream_url"] = data["stream_url"]
-                    result["stream_type"] = data.get("stream_type", "m3u8")
-                    result["host"] = data.get("host") or result["host"]
-                    result["iframe_url"] = target_embed
-                    return result
+                result["host"] = data.get("host") or result["host"]
+                result["iframe_url"] = data.get("embed_url") or target_embed
+                stream_url = data.get("stream_url")
+                kind = (data.get("type") or data.get("stream_type") or "").lower()
+                # A "fallback" answer is only playable when it still carries a direct hls/mp4 link;
+                # type "embed" means only the player page works: the UI then shows it in an iframe
+                playable = data.get("status") == "success" or (data.get("status") == "fallback" and kind in RESOLVER_TYPES)
+                stream_type = self._stream_type(kind, stream_url)
+                if playable and stream_url and stream_type:
+                    result["stream_url"] = stream_url
+                    result["stream_type"] = stream_type
+                return result
         except Exception:
             pass
 
         return result
+
+    @staticmethod
+    def _stream_type(kind: str, stream_url: Optional[str]) -> Optional[str]:
+        if kind in RESOLVER_TYPES:
+            return RESOLVER_TYPES[kind]
+        if kind in ("embed", "iframe", "raw"):
+            return None
+        if (stream_url or "").lower().split("?")[0].endswith(".mp4"):
+            return "mp4"
+        return "m3u8"
 
 catalog_service = CatalogService()

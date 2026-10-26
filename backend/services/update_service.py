@@ -53,7 +53,7 @@ class UpdateService:
         return "Inconnu"
 
     def _get_yoitsu_versions(self) -> tuple[str, str]:
-        local_ver = "0.1.6"
+        local_ver = "0.1.9"
         try:
             local_ver = importlib.metadata.version("YoitsuWrap")
         except Exception:
@@ -165,7 +165,8 @@ class UpdateService:
             return {"status": "error", "message": str(e)}
 
     def update_yoitsuwrap(self) -> dict:
-        """Upgrades YoitsuWrap pip package to the latest release."""
+        """Upgrades YoitsuWrap pip package to the latest release ('updated' only when the version changed)."""
+        before, _ = self._get_yoitsu_versions()
         try:
             res = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--upgrade", "YoitsuWrap"],
@@ -175,7 +176,7 @@ class UpdateService:
             )
             new_ver, _ = self._get_yoitsu_versions()
             return {
-                "status": "updated",
+                "status": "updated" if new_ver != before else "up_to_date",
                 "message": res.stdout.strip()[-200:] or "Mis à jour",
                 "new_version": new_ver
             }

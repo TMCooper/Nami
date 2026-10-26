@@ -1,5 +1,16 @@
 import React from 'react';
 import { X, Download, CheckCircle, AlertCircle, Trash2, StopCircle, HardDrive } from 'lucide-react';
+import { formatBytes, formatEta } from '../utils/deviceDownload';
+
+const SOURCE_LABELS = { anime_sama: 'Anime-Sama', voiranime: 'VoirAnime' };
+
+// « 42 % — 31.5 Mo/s — 20 s restantes — 412 Mo / 980 Mo » (YoitsuWrap downloads report sizes and time left)
+const progressText = (task) => [
+  `${task.progress}%`,
+  task.speed,
+  task.eta != null ? `${formatEta(task.eta)} restantes` : '',
+  task.total_bytes ? `${formatBytes(task.downloaded_bytes)} / ${formatBytes(task.total_bytes)}` : ''
+].filter(Boolean).join(' — ');
 
 export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCancelTask, onClearCompleted }) {
   if (!isOpen) return null;
@@ -79,9 +90,12 @@ export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCa
                       <h4 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff' }}>{task.anime_title}</h4>
                       <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                         {task.season} — Ép. {task.episode_num}
+                        {task.mode === 'wrapper' && (
+                          <span title="Téléchargé par YoitsuWrap">{` — YoitsuWrap${task.source ? ` · ${SOURCE_LABELS[task.source] || task.source}` : ''}`}</span>
+                        )}
                       </p>
                     </div>
-                    {isDownloading && (
+                    {(isDownloading || task.status === 'queued') && (
                       <button className="btn btn-secondary btn-icon" style={{ width: '26px', height: '26px' }} onClick={() => onCancelTask(task.id)} title="Annuler">
                         <StopCircle size={12} color="var(--primary)" />
                       </button>
@@ -101,9 +115,9 @@ export default function DownloadManagerDrawer({ isOpen, onClose, downloads, onCa
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem' }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: isCompleted ? 'var(--accent-green)' : isError ? 'var(--primary)' : 'var(--text-muted)' }}>
                       {isCompleted && <><CheckCircle size={11} /> Terminé</>}
-                      {isError && <><AlertCircle size={11} /> Erreur</>}
+                      {isError && <><AlertCircle size={11} /> {task.error_message ? `Erreur : ${task.error_message}` : 'Erreur'}</>}
                       {task.status === 'queued' && 'En attente...'}
-                      {task.status === 'downloading' && `${task.progress}% — ${task.speed}`}
+                      {task.status === 'downloading' && progressText(task)}
                       {task.status === 'cancelled' && 'Annulé'}
                     </span>
                     {task.file_path && (

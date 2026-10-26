@@ -1,9 +1,9 @@
 import os
-import json
 import hashlib
 import secrets
 import time
 from typing import Optional, List, Dict
+from backend.services.storage import load_json, save_json
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -27,22 +27,16 @@ class UserService:
         self.users: Dict[str, dict] = self._load()
 
     def _load(self) -> dict:
-        if os.path.exists(USERS_FILE):
-            try:
-                with open(USERS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        # Ensure default is never kept
-                        data.pop("default", None)
-                        return data
-            except Exception as e:
-                print(f"[UserService] Error loading users DB: {e}")
+        data = load_json(USERS_FILE, dict)
+        if isinstance(data, dict):
+            # Ensure default is never kept
+            data.pop("default", None)
+            return data
         return {}
 
     def _save(self):
         try:
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.users, f, indent=2, ensure_ascii=False)
+            save_json(USERS_FILE, self.users)
         except Exception as e:
             print(f"[UserService] Error saving users DB: {e}")
 
@@ -130,17 +124,23 @@ class UserService:
             # Clean user history
             try:
                 from backend.services.history_service import history_service
-                if user_id in history_service.history:
-                    del history_service.history[user_id]
-                    history_service._save()
+                history_service.delete_user_data(user_id)
             except Exception as e:
                 print(f"[UserService] Error deleting user history: {e}")
+
+            # Clean user watchlist
+            try:
+                from backend.services.watchlist_service import watchlist_service
+                watchlist_service.delete_user_data(user_id)
+            except Exception as e:
+                print(f"[UserService] Error deleting user watchlist: {e}")
 
             # Clean user recent items
             try:
                 from backend.services.cache_service import cache_service
-                if user_id in cache_service.recent_data:
-                    del cache_service.recent_data[user_id]
+                with cache_service._recent_lock:
+                    removed = cache_service.recent_data.pop(user_id, None)
+                if removed is not None:
                     cache_service._save_recent()
             except Exception as e:
                 print(f"[UserService] Error deleting user recents: {e}")

@@ -15,5 +15,8 @@ services:
       # Montage de votre disque dur externe ou dossier cible
       # Exemple pour votre disque externe: - /media/tmcooper/Elements:/downloads
       - ./downloads:/downloads
+      # Catalogues et caches des APIs (sinon perdus a chaque reconstruction du conteneur)
+      - ./data/apis/animesama:/app/AnimeSamaApi/src/data
+      - ./data/apis/voiranime:/app/voiranime_API/data
     environment:
       - PYTHONUNBUFFERED=1

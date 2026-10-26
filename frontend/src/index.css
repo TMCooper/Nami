@@ -779,6 +779,15 @@ body {
   color: #ff8a8a;
   font-size: 0.8rem;
 }
+.fiche-season-note {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
 /* Where an episode was taken from */
 .badge.ep-source {
   font-size: 0.62rem;

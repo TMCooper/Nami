@@ -18,6 +18,14 @@ def test_config_exit_is_contained_and_retried_later(monkeypatch, tmp_path):
     assert service.get_config() is None  # inside the retry delay: no new ping
     assert len(attempts) == 1
 
+    # One API down: the other one keeps being used during the retry delay
+    partial = {"ANIMESAMA": object()}
+    monkeypatch.setattr(yoitsu_module.Config, "create_config", staticmethod(lambda **kwargs: partial))
+    service.allow_retry()
+    assert service.get_config() is partial
+    assert service.get_config() is partial  # inside the retry delay: no new ping, still usable
+    assert service._config is None          # never cached: the missing API is retried later
+
     complete = {"ANIMESAMA": object(), "VOIRANIME": object()}
     monkeypatch.setattr(yoitsu_module.Config, "create_config", staticmethod(lambda **kwargs: complete))
     service.allow_retry()  # what an API restart does once the API answers again

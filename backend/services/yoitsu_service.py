@@ -15,6 +15,7 @@ CONFIG_RETRY_DELAY = 30.0
 class YoitsuService:
     def __init__(self):
         self._config: Optional[Dict[str, Config]] = None
+        self._partial: Optional[Dict[str, Config]] = None   # the APIs that answered while another one is down
         self._config_retry_at = 0.0
         self._lock = threading.RLock()
         self._cache_scans: Dict[str, Scan] = {}
@@ -24,6 +25,7 @@ class YoitsuService:
         """Forget the cached Config."""
         with self._lock:
             self._config = None
+            self._partial = None
             self._config_retry_at = 0.0
 
     def api_link(self, source: str) -> str:
@@ -45,13 +47,14 @@ class YoitsuService:
 
         Config.create_config pings every API and calls exit() when one is down: the resulting
         SystemExit (not an Exception) is caught here so it can never stop the Nami server.
-        A partial config is returned but not cached, so a later call retries the missing API.
+        A partial config is returned but not cached, so a later call retries the missing API; until then
+        the APIs that answered keep being used (an anime of Anime-Sama needs no VoirAnime).
         """
         with self._lock:
             if self._config:
                 return self._config
             if time.monotonic() < self._config_retry_at:
-                return None
+                return self._partial
 
             root_path = settings_service.get_root_folder()
             downloads_path = os.path.join(root_path, "nami")
@@ -73,7 +76,8 @@ class YoitsuService:
                 return cfg
 
             self._config_retry_at = time.monotonic() + CONFIG_RETRY_DELAY
-            return cfg or None
+            self._partial = cfg or None
+            return self._partial
 
     def get_anime(self, title: str, version: str = "vostfr") -> Optional[Anime]:
         """Fetches or returns cached unified Anime object from YoitsuWrap."""

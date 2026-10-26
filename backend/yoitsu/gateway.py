@@ -944,13 +944,11 @@ class YoitsuGateway:
     @staticmethod
     def _fiche_of(details: dict, snap: dict) -> dict:
         anime = snap.get("anime") or {}
-        seasons, keys = [], set()
-        for s in snap.get("seasons") or []:
-            if not s.get("episodes") or s["key"] in keys:
-                continue
-            keys.add(s["key"])
-            seasons.append({"key": s["key"], "label": s["label"], "episodes": len(s["episodes"]),
-                            "sources": sorted({e["source"] for e in s["episodes"] if e.get("source")})})
+        # Every season YoitsuWrap returned, empty ones included: what the API said explains them
+        seasons = [{"key": s["key"], "label": s["label"], "episodes": len(s.get("episodes") or []),
+                    "sources": sorted({e["source"] for e in s.get("episodes") or [] if e.get("source")}),
+                    "api_links": s.get("api_links"), "error": s.get("error"), "same_as": s.get("same_as")}
+                   for s in snap.get("seasons") or []]
         # YoitsuWrap keeps scans in its own Scan object: the page reads them as before
         seasons += [{"key": s["key"], "label": s["label"], "is_scans": True, "episodes": None,
                      "sources": _dedup(v["source"] for v in s.get("variants") or [])}
@@ -1004,7 +1002,7 @@ class YoitsuGateway:
         season_obj = next((s for s in details["seasons"] if s["key"] == season), None)
         job = await self._wrapper_job(details)
         snap = self.wrapper.get(job[0], version) if job else None
-        fiche_season = next((s for s in (snap or {}).get("seasons") or [] if s.get("key") == season and s.get("episodes")), None)
+        fiche_season = next((s for s in (snap or {}).get("seasons") or [] if s.get("key") == season), None)
         if fiche_season and not (season_obj and season_obj.get("is_scans")):
             return await self._fiche_episodes(details, season_obj, fiche_season, snap, job[0], version, refresh)
         if not season_obj:
@@ -1053,7 +1051,8 @@ class YoitsuGateway:
             except Exception as e:   # the fiche does not depend on them
                 print(f"[Yoitsu] Source players skipped for {variant['url']}: {e!r}")
         return {
-            "season": {"key": fiche_season["key"], "label": fiche_season["label"]},
+            "season": {"key": fiche_season["key"], "label": fiche_season["label"], "api_links": fiche_season.get("api_links"),
+                       "error": fiche_season.get("error"), "same_as": fiche_season.get("same_as")},
             "variant": variant,
             "is_scans": False,
             "anime_id": details["id"],

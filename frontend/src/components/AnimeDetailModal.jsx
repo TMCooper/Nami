@@ -41,6 +41,8 @@ export default function AnimeDetailModal({
   // « Voir les épisodes des sources sans attendre »: the source APIs' seasons instead of the fiche
   const [sourcesMode, setSourcesMode] = useState(false);
   const [notice, setNotice] = useState('');
+  // What YoitsuWrap said about the season shown (links the API gave, failed call, another season's episodes)
+  const [seasonInfo, setSeasonInfo] = useState(null);
   const ficheRequestRef = useRef(0);
   // Episodes picked for a download to this device (selection mode of the episode grid)
   const [selecting, setSelecting] = useState(false);
@@ -105,7 +107,7 @@ export default function AnimeDetailModal({
 
   const firstSeasonOf = (list) => list?.find((s) => !s.is_scans) || list?.[0] || null;
   // A fiche without any episode (no VF, say) is no fiche: its scans alone would hide that
-  const hasEpisodes = (next) => Boolean(next?.fiche?.seasons?.some((s) => !s.is_scans));
+  const hasEpisodes = (next) => Boolean(next?.fiche?.seasons?.some((s) => !s.is_scans && s.episodes > 0));
 
   // The fiche of a version: starts its build when needed; its seasons are shown once it exists
   const loadFiche = (data, v, refresh = false, keepSeasonKey = null) => {
@@ -170,6 +172,7 @@ export default function AnimeDetailModal({
         setEpisodes(res.episodes || []);
         // The season key travels with the variant of the same response: history writes pair them
         setActiveVariant(res.variant ? { ...res.variant, season_key: res.season?.key || season.key } : null);
+        setSeasonInfo(res.from_wrapper ? res.season : null);
         if (res.variant && !quiet) checkDownloadedStatus(res.variant, res.season?.label, version || 'vostfr');
       })
       .catch((err) => console.error("Error loading episodes:", err))
@@ -598,8 +601,10 @@ export default function AnimeDetailModal({
                         <button
                           key={s.key}
                           className={`btn ${selectedSeasonKey === s.key ? 'btn-primary' : 'btn-secondary'}`}
-                          style={{ padding: '4px 12px', fontSize: '0.8rem' }}
-                          title={fromFiche && s.episodes ? `${s.episodes} épisode${s.episodes > 1 ? 's' : ''}` : undefined}
+                          style={{ padding: '4px 12px', fontSize: '0.8rem', opacity: fromFiche && !s.is_scans && !s.episodes ? 0.55 : 1 }}
+                          title={fromFiche && !s.is_scans
+                            ? (s.episodes ? `${s.episodes} épisode${s.episodes > 1 ? 's' : ''}` : 'Aucun épisode gardé par YoitsuWrap')
+                            : undefined}
                           onClick={() => selectSeason(details, s, sourcesMode ? activeVariant?.source : '', fromFiche ? version : activeVariant?.version || 'vostfr')}
                         >
                           {s.label}
@@ -625,7 +630,9 @@ export default function AnimeDetailModal({
                       ) : ficheState === 'ready' ? (
                         <><ShieldCheck size={14} /> Fiche YoitsuWrap · liens vérifiés {formatRelativeDate(fiche.built_at).toLowerCase()}</>
                       ) : (
-                        <><RotateCw size={13} /> Liens de la fiche expirés : « Actualiser » les vérifie à nouveau</>
+                        <><RotateCw size={13} /> {fiche?.error
+                          ? `Mise à jour de la fiche impossible (${fiche.error}) : « Actualiser » pour réessayer`
+                          : 'Liens de la fiche expirés : « Actualiser » les vérifie à nouveau'}</>
                       )}
                     </p>
                   )}
@@ -805,11 +812,23 @@ export default function AnimeDetailModal({
                   )}
                 </div>
 
+                {!isLoadingEpisodes && fromFiche && seasonInfo && !isScanMode && (seasonInfo.same_as || !episodes.some((ep) => ep.verified)) && (
+                  <p className="fiche-season-note">
+                    {seasonInfo.same_as
+                      ? `L'API a renvoyé les mêmes épisodes que « ${seasonInfo.same_as} » pour cette saison : YoitsuWrap les a gardés tels quels.`
+                      : `YoitsuWrap n'a gardé aucun épisode de cette saison : ${seasonInfo.error
+                        ? `${seasonInfo.error}.`
+                        : seasonInfo.api_links
+                          ? `l'API a donné ${seasonInfo.api_links} lien${seasonInfo.api_links > 1 ? 's' : ''}, aucun n'a passé la vérification.`
+                          : "l'API n'a renvoyé aucun lien."}${episodes.length ? ' Les épisodes de la source sont listés ci-dessous, sans vérification.' : ' « Actualiser » relance la fiche.'}`}
+                  </p>
+                )}
+
                 {isLoadingEpisodes ? (
                   <div style={{ padding: '40px', textAlign: 'center' }}>
                     <Loader2 className="animate-spin" size={24} color="var(--primary)" />
                   </div>
-                ) : episodes.length === 0 ? (
+                ) : episodes.length === 0 ? (fromFiche && seasonInfo && !isScanMode ? null :
                   <p style={{ color: 'var(--text-muted)' }}>
                     {isScanMode
                       ? "Aucun chapitre de scan trouvé."

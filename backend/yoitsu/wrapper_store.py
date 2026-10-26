@@ -11,6 +11,7 @@ background workers, never in a request, and its result is kept as a snapshot, th
   on the next view, and « Actualiser » on the anime page rebuilds it at once.
 """
 import os
+import re
 import time
 import hashlib
 import threading
@@ -21,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from backend.services.storage import load_json, save_json
-from backend.yoitsu.normalize import season_key, slug_of
+from backend.yoitsu.normalize import season_key, slug_of, title_key
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 WRAPPER_DIR = os.path.join(DATA_DIR, "cache", "yoitsu")
@@ -29,6 +30,12 @@ DEFAULT_LIFETIME = 6 * 3600     # links without an expiry in their query are tru
 EXPIRY_MARGIN = 600             # a link this close to its expiry is treated as expired
 RETRY_FAILED = 900              # a failed build is retried after this delay
 BUILD_WORKERS = 2               # a long build (One Piece) must not hold every other anime back
+# YoitsuWrap sets no timeout. VoirAnime's getAnimeLink resolves every episode of a season before it
+# answers (minutes when nothing is cached): only a dead API is cut, never a slow one
+CONNECT_TIMEOUT = 15
+READ_TIMEOUT = 1800
+INFO_TIMEOUT = 120              # Nami's own getInfoAnime checks before a build
+SNAPSHOT_FORMAT = 2             # fiches of an older format (seasons merged by label) are rebuilt on their next view
 SOURCE_NAMES = {"ANIMESAMA": "anime_sama", "VOIRANIME": "voiranime"}
 WRAPPER_HOST = "YoitsuWrap"
 
@@ -38,12 +45,30 @@ _tracking = threading.local()   # .job: progress dict of the build running in th
 
 def _request_with_timeout(self, method, url, **kwargs):
     # YoitsuWrap calls requests without a timeout: one hung API call would block the build worker forever
-    kwargs.setdefault("timeout", (10, 180))
-    response = _original_request(self, method, url, **kwargs)
+    kwargs.setdefault("timeout", (CONNECT_TIMEOUT, READ_TIMEOUT))
     job = getattr(_tracking, "job", None)
+    try:
+        response = _original_request(self, method, url, **kwargs)
+    except requests.RequestException as e:
+        if job is not None:
+            _note_failure(job, url, e)
+        raise
     if job is not None:
         _observe(job, url, response)
     return response
+
+
+def _request_label(url: str) -> str:
+    query = parse_qs(urlparse(url).query)
+    return (query.get("s") or [""])[0]
+
+
+def _note_failure(job: dict, url: str, error: Exception):
+    """Why a season of the fiche may come back empty: its API call failed (YoitsuWrap skips it silently)."""
+    label = _request_label(url)
+    if label:
+        reason = "l'API n'a pas répondu à temps" if isinstance(error, requests.Timeout) else "l'API n'a pas répondu"
+        job.setdefault("failures", {})[label] = reason
 
 
 requests.sessions.Session.request = _request_with_timeout
@@ -67,8 +92,12 @@ def _observe(job: dict, url: str, response):
                 job.update(season=label, checked=0, episodes=0)
         elif parsed.path.endswith("/getAnimeLink"):
             links = response.json()
-            if isinstance(links, list) and not job.get("episodes"):
-                job["episodes"] = len(links)
+            if isinstance(links, list):
+                label = (query.get("s") or [""])[0]
+                found = job.setdefault("links", {})
+                found[label] = found.get(label, 0) + len(links)
+                if not job.get("episodes"):
+                    job["episodes"] = len(links)
     except (ValueError, AttributeError):
         pass
 
@@ -109,24 +138,74 @@ def link_expiry(url: str, built_at: float) -> float:
     return built_at + DEFAULT_LIFETIME
 
 
-def snapshot_from_anime(anime, query: str, version: str, sources: List[str], built_at: float) -> dict:
-    """Plain data of a YoitsuWrap Anime: what Nami keeps of it."""
-    seasons, expiries = [], []
-    for season in anime.get_seasons().values():
-        label = season.get_saison()
+def wrapper_key_of(label: str) -> str:
+    """The key YoitsuWrap files a season under: its number, else its label ('Saison 2' -> '2', 'OAV')."""
+    match = re.search(r"\d+", label or "")
+    return match.group() if match else (label or "")
+
+
+def _season_label(wrapper_key: str, said) -> str:
+    """Label of a season of the fiche: the one the API gave when it names this very season, else YoitsuWrap's key.
+
+    The key comes from the season YoitsuWrap asked for; the API's answer can name another one (VoirAnime
+    answers « BorN » for « BorN: Yomigaeranai Fushichou »; Anime-Sama answers None for a season it lacks).
+    """
+    own = f"Saison {wrapper_key}" if wrapper_key.isdigit() else wrapper_key
+    if isinstance(said, str) and said.strip():
+        if wrapper_key.isdigit() and wrapper_key_of(said) == wrapper_key:
+            return said.strip()
+        if title_key(said) == title_key(wrapper_key):
+            return said.strip()
+    return own or "Saison"
+
+
+def snapshot_from_anime(anime, query: str, version: str, sources: List[str], built_at: float,
+                        job: Optional[dict] = None) -> dict:
+    """Plain data of a YoitsuWrap Anime: what Nami keeps of it.
+
+    Every season YoitsuWrap returns is kept, in its order and under its own key, even without episodes:
+    what the API said about it (links found, failed call) explains an empty one.
+    """
+    job = job or {}
+    links_by_key: Dict[str, int] = {}
+    for label, count in (job.get("links") or {}).items():
+        links_by_key[wrapper_key_of(label)] = links_by_key.get(wrapper_key_of(label), 0) + count
+    failures = {wrapper_key_of(label): reason for label, reason in (job.get("failures") or {}).items()}
+
+    seasons, expiries, keys, seen_links = [], [], set(), {}
+    for wrapper_key, season in anime.get_seasons().items():
+        wrapper_key = str(wrapper_key)
+        label = _season_label(wrapper_key, season.get_saison())
+        key = season_key(label)[0]
+        base, n = key, 2
+        while key in keys:   # never two seasons under one key: none of them may be lost
+            key, n = f"{base}-{n}", n + 1
+        keys.add(key)
         episodes = []
-        for ep in season.get_episodes():
+        for index, ep in enumerate(season.get_episodes(), start=1):
             if not ep.link:
                 continue
+            try:
+                num = int(ep.episode_number)
+            except (TypeError, ValueError):
+                num = index
             episodes.append({
-                "num": int(ep.episode_number),
+                "num": num,
                 "link": ep.link,
                 "source": SOURCE_NAMES.get(str(ep.source).upper(), str(ep.source).lower()),
             })
             expiries.append(link_expiry(ep.link, built_at))
         episodes.sort(key=lambda e: e["num"])
-        seasons.append({"label": label, "key": season_key(label)[0], "episodes": episodes})
+        entry = {"label": label, "key": key, "wrapper_key": wrapper_key, "episodes": episodes,
+                 "api_links": links_by_key.get(wrapper_key), "error": failures.get(wrapper_key)}
+        signature = tuple(e["link"] for e in episodes)
+        if signature and signature in seen_links:
+            entry["same_as"] = seen_links[signature]   # the API answered another season's episodes
+        elif signature:
+            seen_links[signature] = label
+        seasons.append(entry)
     return {
+        "format": SNAPSHOT_FORMAT,
         "query": query,
         "version": version,
         "sources": sources,
@@ -166,21 +245,23 @@ def build_with_wrapper(query: str, version: str, allowed: Dict[str, set], order:
         if conf is None or not slugs:
             continue
         try:
-            rows = requests.get(f"{conf.API_LINK}/getInfoAnime", params={"q": query}, timeout=20).json()
+            rows = requests.get(f"{conf.API_LINK}/getInfoAnime", params={"q": query}, timeout=(CONNECT_TIMEOUT, INFO_TIMEOUT)).json()
         except (requests.RequestException, ValueError):
             continue
-        if isinstance(rows, list) and rows and isinstance(rows[0], dict) \
-                and slug_of(rows[0].get("base_url") or rows[0].get("url") or "") in slugs:
+        rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        named = {slug_of(u) for r in rows for u in (r.get("base_url"), r.get("url"), r.get("_vostfr_url"), r.get("_vf_url")) if u}
+        if named & slugs:
             picked[name] = conf
     if not picked:
         return None
     job = getattr(_tracking, "job", None)
     if job is not None:
         job["season_labels"] = set()   # the checks above were not YoitsuWrap's own calls
+        job.pop("failures", None)
     anime = Anime.search_by_name(title=query, config=picked, version=version)
     if not isinstance(anime, Anime):
         return None
-    return snapshot_from_anime(anime, query, version, [SOURCE_NAMES[n] for n in picked], time.time())
+    return snapshot_from_anime(anime, query, version, [SOURCE_NAMES[n] for n in picked], time.time(), job)
 
 
 class WrapperStore:
@@ -212,7 +293,7 @@ class WrapperStore:
 
     @staticmethod
     def is_fresh(snap: Optional[dict]) -> bool:
-        return bool(snap) and time.time() < float(snap.get("valid_until") or 0) - EXPIRY_MARGIN
+        return bool(snap) and snap.get("format", 1) >= SNAPSHOT_FORMAT             and time.time() < float(snap.get("valid_until") or 0) - EXPIRY_MARGIN
 
     def status(self, key: str, version: str) -> dict:
         snap = self.get(key, version)
@@ -231,7 +312,8 @@ class WrapperStore:
             "built_at": (snap or {}).get("built_at"),
             "valid_until": (snap or {}).get("valid_until"),
             "episodes": sum(len(s.get("episodes") or []) for s in (snap or {}).get("seasons") or []),
-            "error": job.get("error") if state == "failed" else None,
+            # A failed rebuild keeps the previous fiche (state 'expired'): its error is still told
+            "error": job.get("error") if job.get("state") == "failed" else None,
             "progress": progress_of(job.get("tracking") or {}) if state == "running" else None,
         }
 

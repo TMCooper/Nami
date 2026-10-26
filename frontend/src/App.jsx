@@ -29,7 +29,6 @@ const RESTORE_WINDOW_MS = 60000; // a re-add this soon after a removal is an und
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeSource, setActiveSource] = useState('all');
   const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' | 'history' | 'watchlist' | 'offline'
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -257,12 +256,10 @@ export default function App() {
   };
 
   // Load catalog or search results
-  const loadCatalog = useCallback((query = '', source = 'all') => {
+  // Every source at once: one card per anime, the fiche YoitsuWrap builds from all of them
+  const loadCatalog = useCallback((query = '') => {
     setIsLoading(true);
-    const q = query.trim();
-    const url = q
-      ? `/api/search?q=${encodeURIComponent(q)}&source=${source}`
-      : `/api/search?q=&source=${source}`;
+    const url = `/api/search?q=${encodeURIComponent(query.trim())}`;
 
     fetch(url)
       .then((res) => res.json())
@@ -273,12 +270,12 @@ export default function App() {
 
   const handleSearch = () => {
     setActiveTab('catalog');
-    loadCatalog(searchQuery, activeSource);
+    loadCatalog(searchQuery);
   };
 
   useEffect(() => {
-    loadCatalog(searchQuery, activeSource);
-  }, [activeSource]);
+    loadCatalog('');
+  }, []);
 
   // Poll downloads
   useEffect(() => {
@@ -348,7 +345,7 @@ export default function App() {
         // No confident match: let the user pick the entry from a catalogue search
         setSearchQuery(anime.title);
         setActiveTab('catalog');
-        loadCatalog(anime.title, activeSource);
+        loadCatalog(anime.title);
       }
     } catch (e) {
       console.warn("Could not open anime details:", e);
@@ -362,7 +359,7 @@ export default function App() {
   };
 
   const handleApisReady = () => {
-    loadCatalog(searchQuery, activeSource);
+    loadCatalog(searchQuery);
     loadRandomSuggestions();
     loadUserShelves();
   };
@@ -525,8 +522,6 @@ export default function App() {
         searchQuery={searchQuery}
         setSearchQuery={setSearchQuery}
         onSearch={handleSearch}
-        activeSource={activeSource}
-        setActiveSource={setActiveSource}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         activeDownloadsCount={activeDownloadsCount}
@@ -555,7 +550,6 @@ export default function App() {
             results={results}
             isLoading={isLoading}
             searchQuery={searchQuery}
-            activeSource={activeSource}
             continueWatching={continueWatching}
             recentAnimes={recentAnimes}
             randomSuggestions={randomSuggestions}
@@ -612,6 +606,7 @@ export default function App() {
           onDownloadEpisode={handleDownloadEpisode}
           onDownloadBulk={handleDownloadBulk}
           onDownloadToDevice={device.start}
+          onDownloadsStarted={() => setIsDownloadsOpen(true)}
           isInWatchlist={isInWatchlist}
           onToggleWatchlist={handleToggleWatchlist}
         />

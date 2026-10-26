@@ -52,6 +52,7 @@ class SettingsUpdate(BaseModel):
     root_folder: Optional[str] = None
     default_provider: Optional[str] = None
     download_quality: Optional[str] = None
+    max_concurrent_downloads: Optional[int] = Field(None, ge=1, le=6)
 
 class DownloadCreate(BaseModel):
     anime_title: str
@@ -391,6 +392,20 @@ async def get_anime_wrapper_status(entity_id: str, version: str = Query("vostfr"
         raise HTTPException(status_code=404, detail="Anime introuvable.")
     return yoitsu_gateway.wrapper_status(entity_id, version)
 
+@router.get("/anime/{entity_id}/fiche")
+async def get_anime_fiche(
+    entity_id: str,
+    version: str = Query("vostfr", pattern="^(vostfr|vf)$"),
+    refresh: bool = Query(False, description="Reconstruire la fiche avec YoitsuWrap")
+):
+    # The anime as YoitsuWrap builds it (seasons, episodes and their source); starts the build when needed
+    if not entity_id.startswith("a-"):
+        raise HTTPException(status_code=404, detail="Anime introuvable.")
+    fiche = await yoitsu_gateway.fiche(entity_id, version, refresh)
+    if fiche is None:
+        raise HTTPException(status_code=404, detail="Anime introuvable.")
+    return fiche
+
 @router.get("/anime/{entity_id}/preview")
 async def get_anime_preview(entity_id: str, title: str = Query("", max_length=300, description="Titre de la carte")):
     # Hover previews: caches only, so hovering a grid never scrapes nor fills the recents
@@ -622,19 +637,29 @@ async def get_video_thumbnail(file_path: str = Query(..., description="Chemin ab
 # --- Episode Download Status Check & Local Library ---
 @router.get("/episodes/download-status")
 async def check_episodes_downloaded(
-    anime_title: str = Query(...),
-    season: str = Query("Saison 1")
+    anime_title: List[str] = Query(..., max_length=4),
+    season: str = Query("Saison 1"),
+    label: str = Query("", description="Saison de la fiche YoitsuWrap"),
+    version: str = Query("", pattern="^(|vostfr|vf)$")
 ):
     root_folder = settings_service.get_root_folder()
-    anime_base = os.path.join(root_folder, "nami", "anime")
-    safe_anime = resolve_anime_folder(anime_base, anime_title)
-    safe_season = sanitize_filename(season)
-    season_dir = os.path.join(anime_base, safe_anime, safe_season)
+    season_dirs = []
+    for title in anime_title:
+        # Old downloads: <root>/nami/anime/<anime>/<season name>/
+        anime_base = os.path.join(root_folder, "nami", "anime")
+        season_dirs.append(os.path.join(anime_base, resolve_anime_folder(anime_base, title), sanitize_filename(season)))
+        if label and version:
+            # YoitsuWrap downloads: <root>/nami/Anime/<anime>/<season>/<version>/
+            wrapper_base = os.path.join(root_folder, "nami", "Anime")
+            season_dirs.append(os.path.join(wrapper_base, resolve_anime_folder(wrapper_base, title),
+                                            sanitize_filename(label), version))
 
     status_map = {}
-    if os.path.exists(season_dir):
+    for season_dir in dict.fromkeys(season_dirs):
+        if not os.path.isdir(season_dir):
+            continue
         for f in os.listdir(season_dir):
-            if f.lower().endswith(('.mp4', '.mkv', '.webm')):
+            if f.lower().endswith(('.mp4', '.mkv', '.webm')) and ".temp." not in f.lower():
                 full_path = os.path.join(season_dir, f)
                 m = re.search(r'\d+', f)
                 if m:

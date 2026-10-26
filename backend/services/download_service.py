@@ -4,15 +4,19 @@ import time
 import uuid
 import re
 import asyncio
+import threading
 import subprocess
 import aiohttp
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from backend.services.settings_service import settings_service
 from backend.services.storage import load_json, save_json
 from backend.services.http_headers import USER_AGENT, stream_referer
+from backend.services import wrapper_download
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
 DOWNLOADS_DB = os.path.join(DATA_DIR, "downloads.json")
+WRAPPER_BATCHES = 2     # seasons downloaded at the same time; their episodes run in parallel inside YoitsuWrap
 
 def sanitize_filename(name: str) -> str:
     """Sanitize folder and file names for cross-platform compatibility"""
@@ -58,7 +62,14 @@ class DownloadTask:
         self.speed = "0 MB/s"
         self.error_message = ""
         self.file_path = ""
-        self.created_at = asyncio.get_event_loop().time()
+        self.created_at = time.time()
+        # YoitsuWrap downloads (mode "wrapper"): the verified link of the fiche, downloaded by YoitsuWrap
+        self.mode = "legacy"
+        self.version = ""
+        self.source = ""
+        self.downloaded_bytes = 0
+        self.total_bytes = 0
+        self.eta = None
 
     def to_dict(self):
         return {
@@ -73,7 +84,13 @@ class DownloadTask:
             "progress": round(self.progress, 1),
             "speed": self.speed,
             "error_message": self.error_message,
-            "file_path": self.file_path
+            "file_path": self.file_path,
+            "mode": self.mode,
+            "version": self.version,
+            "source": self.source,
+            "downloaded_bytes": self.downloaded_bytes,
+            "total_bytes": self.total_bytes,
+            "eta": self.eta
         }
 
 def normalize_anime_and_season(anime_title: str, season: str):
@@ -111,6 +128,9 @@ class DownloadService:
         self.max_concurrent = 3
         self.worker_task = None
         self._last_save = 0.0
+        self._save_lock = threading.Lock()
+        self._wrapper_items: Dict[str, wrapper_download.Item] = {}
+        self._batches = ThreadPoolExecutor(max_workers=WRAPPER_BATCHES, thread_name_prefix="yoitsu-download")
         self._load_tasks()
 
     def _load_tasks(self):
@@ -128,7 +148,16 @@ class DownloadService:
                             fallback_urls=item.get("fallback_urls")
                         )
                         t.id = item["id"]
+                        t.mode = item.get("mode", "legacy")
+                        t.version = item.get("version", "")
+                        t.source = item.get("source", "")
                         t.status = item["status"] if item["status"] != "downloading" else "error"
+                        if t.mode == "wrapper" and t.status == "queued":
+                            t.status = "error"   # its YoitsuWrap batch ended with the previous run
+                        if t.status == "error" and not item.get("error_message") and item["status"] != "error":
+                            t.error_message = "Interrompu par l'arrêt du serveur"
+                        else:
+                            t.error_message = item.get("error_message", "")
                         t.progress = item.get("progress", 0.0)
                         t.file_path = item.get("file_path", "")
                         self.tasks[t.id] = t
@@ -142,7 +171,8 @@ class DownloadService:
             return
         self._last_save = now
         try:
-            save_json(DOWNLOADS_DB, [t.to_dict() for t in self.tasks.values()])
+            with self._save_lock:   # YoitsuWrap batches report from their own threads
+                save_json(DOWNLOADS_DB, [t.to_dict() for t in list(self.tasks.values())])
         except Exception as e:
             print(f"[DownloadService] Error saving tasks DB: {e}")
 
@@ -169,6 +199,9 @@ class DownloadService:
     def cancel_task(self, task_id: str) -> bool:
         if task_id in self.tasks:
             self.tasks[task_id].status = "cancelled"
+            item = self._wrapper_items.get(task_id)
+            if item is not None:
+                item.cancelled = True   # its yt-dlp stops at the next progress report
             self._save_tasks()
             return True
         return False
@@ -177,8 +210,82 @@ class DownloadService:
         self.tasks = {k: v for k, v in self.tasks.items() if v.status not in ["completed", "cancelled", "error"]}
         self._save_tasks()
 
+    # --- YoitsuWrap downloads ---
+    def add_wrapper_season(self, anime_title: str, season_label: str, version: str, episodes: List[dict],
+                           cover: str = "") -> List[DownloadTask]:
+        """Episodes of one season of a fiche, downloaded by YoitsuWrap (Season.download_season) in parallel.
+
+        episodes: [{num, link, source}] (links verified by YoitsuWrap). Files land where YoitsuWrap puts
+        them: <root>/nami/Anime/<anime>/<season>/<version>/<n>.mp4.
+        """
+        root = os.path.join(settings_service.get_root_folder(), "nami")
+        folder = resolve_anime_folder(os.path.join(root, "Anime"), anime_title)
+        season_folder = wrapper_download.safe_part(sanitize_filename(season_label) or "Saison_1")
+        season_name = season_label if version == "vostfr" else f"{season_label} VF"
+        tasks, items = [], []
+        for ep in episodes:
+            task = DownloadTask(anime_title=anime_title, season=season_name, episode_num=str(ep["num"]),
+                                stream_url=ep["link"], stream_type="wrapper")
+            task.mode, task.version, task.source = "wrapper", version, ep.get("source") or ""
+            item = wrapper_download.Item(title=folder, season=season_folder, version=version, num=int(ep["num"]),
+                                         link=ep["link"], source=(ep.get("source") or "").upper(), root=root)
+            item.on_change = lambda it, t=task: self._follow(t, it)
+            task.file_path = item.target
+            self.tasks[task.id] = task
+            self._wrapper_items[task.id] = item
+            tasks.append(task)
+            items.append(item)
+        self._save_tasks()
+        if cover:
+            self._save_cover(os.path.join(root, "Anime", folder), cover)
+        workers = int(settings_service.get_settings().get("max_concurrent_downloads") or 3)
+        self._batches.submit(self._run_batch, items, workers, [t.id for t in tasks])
+        return tasks
+
+    def _follow(self, task: DownloadTask, item: wrapper_download.Item):
+        if task.status == "cancelled" and item.status not in ("cancelled",):
+            item.cancelled = True
+            return
+        task.status = item.status
+        task.progress = item.progress
+        task.downloaded_bytes, task.total_bytes, task.eta = item.downloaded, item.total, item.eta
+        task.speed = wrapper_download.format_speed(item.speed) if item.status == "downloading" else (
+            "Terminé" if item.status == "completed" else "")
+        task.error_message = item.error if item.status == "error" else ""
+        if item.status == "completed":
+            task.file_path = item.file_path
+        self._save_tasks(force=item.status != "downloading")
+
+    def _run_batch(self, items: List[wrapper_download.Item], workers: int, task_ids: List[str]):
+        try:
+            # Episodes cancelled while queued never start
+            pending = [i for i, tid in zip(items, task_ids) if self.tasks.get(tid) and self.tasks[tid].status != "cancelled"]
+            wrapper_download.download_season(pending, workers)
+        except Exception as e:
+            print(f"[DownloadService] YoitsuWrap batch failed: {e}")
+            for item, tid in zip(items, task_ids):
+                task = self.tasks.get(tid)
+                if task and task.status in ("queued", "downloading"):
+                    task.status, task.error_message = "error", str(e)[:200]
+        finally:
+            for tid in task_ids:
+                self._wrapper_items.pop(tid, None)
+            self._save_tasks()
+
+    @staticmethod
+    def _save_cover(anime_dir: str, cover: str):
+        """cover.jpg of the anime folder (the offline library shows it)."""
+        try:
+            os.makedirs(anime_dir, exist_ok=True)
+            dest = os.path.join(anime_dir, "cover.jpg")
+            if not os.path.exists(dest) or os.path.getsize(dest) < 1000:
+                from backend.services.cache_service import cache_service
+                cache_service._save_local_cover_async(cover, anime_dir)
+        except Exception as e:
+            print(f"[DownloadService] Warning saving cover.jpg: {e}")
+
     async def _process_queue(self):
-        queued_tasks = [t for t in self.tasks.values() if t.status == "queued"]
+        queued_tasks = [t for t in self.tasks.values() if t.status == "queued" and t.mode != "wrapper"]
         for task in queued_tasks:
             if self.active_downloads >= self.max_concurrent:
                 break

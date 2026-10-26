@@ -4,7 +4,7 @@ import SourcesPanel from './SourcesPanel';
 
 export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
   const [rootFolder, setRootFolder] = useState('/downloads');
-  const [defaultProvider, setDefaultProvider] = useState('all');
+  const [parallel, setParallel] = useState(3);
   const [downloadQuality, setDownloadQuality] = useState('1080p');
   const [isSaved, setIsSaved] = useState(false);
 
@@ -21,7 +21,7 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
       .then((res) => res.json())
       .then((data) => {
         if (data.root_folder) setRootFolder(data.root_folder);
-        if (data.default_provider) setDefaultProvider(data.default_provider);
+        if (data.max_concurrent_downloads) setParallel(Number(data.max_concurrent_downloads));
         if (data.download_quality) setDownloadQuality(data.download_quality);
       })
       .catch((err) => console.error("Error loading settings:", err));
@@ -61,7 +61,7 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         root_folder: rootFolder,
-        default_provider: defaultProvider,
+        max_concurrent_downloads: parallel,
         download_quality: downloadQuality
       })
     })
@@ -154,18 +154,18 @@ export default function SettingsModal({ isOpen, onClose, onSourcesChange }) {
             />
             <div style={{ marginTop: '6px', padding: '6px 10px', background: 'rgba(0, 180, 216, 0.05)', borderRadius: 'var(--radius-sm)', border: '1px dashed rgba(0, 180, 216, 0.25)' }}>
               <code style={{ fontSize: '0.74rem', color: 'var(--accent-cyan)', wordBreak: 'break-all' }}>
-                {rootFolder.trim() || '/downloads'}/nami/anime/[Anime]/[Saison]/[Episode].mp4
+                {rootFolder.trim() || '/downloads'}/nami/Anime/[Anime]/[Saison]/[version]/[n].mp4
               </code>
             </div>
           </div>
 
           <div className="form-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
             <div>
-              <label style={labelStyle}>Source par Défaut</label>
-              <select value={defaultProvider} onChange={(e) => setDefaultProvider(e.target.value)} style={inputStyle}>
-                <option value="all">Toutes les sources</option>
-                <option value="anime_sama">Anime-Sama</option>
-                <option value="voiranime">VoirAnime</option>
+              <label style={labelStyle} title="YoitsuWrap télécharge les épisodes d'une saison en même temps">Épisodes en parallèle</label>
+              <select value={parallel} onChange={(e) => setParallel(Number(e.target.value))} style={inputStyle}>
+                {[1, 2, 3, 4, 5, 6].map((n) => (
+                  <option key={n} value={n}>{n} à la fois</option>
+                ))}
               </select>
             </div>
 

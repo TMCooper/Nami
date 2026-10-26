@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from backend.services.catalog_service import catalog_service
 from backend.yoitsu import gateway as gateway_module
 from backend.yoitsu import wrapper_store as wrapper_module
-from backend.yoitsu.wrapper_store import WrapperStore, link_expiry, snapshot_from_anime, with_wrapper_links
+from backend.yoitsu.wrapper_store import WrapperStore, link_expiry, snapshot_from_anime, wrapper_episodes
 
 from tests.test_yoitsu_gateway import AS_ROWS, FRIEREN_ENTRIES, VA_ROWS, _make_gateway
 
@@ -91,24 +91,31 @@ def test_expired_links_are_rebuilt_and_failures_wait_before_a_retry():
     assert len(calls) == 1                                   # no retry storm
 
 
-def test_verified_links_come_first_and_api_players_stay_as_fallbacks():
+def test_the_fiche_lists_its_episodes_with_their_source_and_api_players_behind():
     episodes = [
         {"num": 1, "title": "Épisode 1", "embed_url": "https://vidmoly.net/e1",
          "players": [{"host": "vidmoly", "embed_url": "https://vidmoly.net/e1"}]},
         {"num": 2, "title": "Sousou no Frieren - 02", "embed_url": "https://voir-anime.to/anime/x/x-02-vostfr/"},
         {"num": 4, "title": "Épisode 4", "embed_url": "https://vidmoly.net/e4"},
     ]
-    out = with_wrapper_links(episodes, _snapshot()["seasons"][0])
+    season = _snapshot()["seasons"][0]
+    out = wrapper_episodes(season, episodes, fresh=True, api_source="anime_sama")
     assert [e["num"] for e in out] == [1, 2, 3, 4]
-    assert out[0]["players"][0] == {"host": "YoitsuWrap", "embed_url": "https://cdn.test/1/master.m3u8", "verified": True}
-    assert out[0]["players"][1]["host"] == "vidmoly" and out[0]["embed_url"] == "https://vidmoly.net/e1"
+    assert out[0]["players"][0] == {"host": "YoitsuWrap", "embed_url": "https://cdn.test/1/master.m3u8",
+                                    "verified": True, "source": "anime_sama"}
+    assert out[0]["players"][1]["host"] == "vidmoly" and out[0]["embed_url"] == "https://cdn.test/1/master.m3u8"
+    assert out[1]["source"] == "voiranime"
     assert out[1]["players"][1] == {"host": "VoirAnime", "embed_url": "https://voir-anime.to/anime/x/x-02-vostfr/"}
-    assert out[2]["verified"] and out[2]["embed_url"] == "https://cdn.test/3/master.m3u8"   # only YoitsuWrap had it
-    assert "verified" not in out[3]                                                         # the API's alone
-    assert with_wrapper_links(episodes, None) is episodes
+    assert out[2]["verified"] and out[2]["title"] == "Épisode 3"           # only YoitsuWrap had it
+    assert out[3]["verified"] is False and out[3]["source"] == "anime_sama"  # YoitsuWrap could not check it
+
+    # Expired links: the API players are tried first, the old link last
+    stale = wrapper_episodes(season, episodes, fresh=False, api_source="anime_sama")
+    assert stale[0]["players"][0]["host"] == "vidmoly" and stale[0]["players"][-1]["host"] == "YoitsuWrap"
+    assert stale[2]["players"][0]["host"] == "YoitsuWrap"                    # nothing else to try
 
 
-def test_episodes_use_a_fresh_build_of_their_own_source(tmp_path, monkeypatch):
+def test_the_page_shows_the_fiche_built_by_yoitsuwrap(tmp_path, monkeypatch):
     gw = _make_gateway(tmp_path, monkeypatch, AS_ROWS, VA_ROWS, FRIEREN_ENTRIES)
     builds = []
     gw.wrapper = WrapperStore(builder=lambda q, v, allowed, order: builds.append((q, v, allowed, order)) or None)
@@ -123,24 +130,37 @@ def test_episodes_use_a_fresh_build_of_their_own_source(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_module.catalog_service, "fetch_anime_sama_players", as_players)
     monkeypatch.setattr(gateway_module.catalog_service, "get_details", va_details)
 
-    # No build yet: the API players, and the build is started with this entity's own pages only
-    first = asyncio.run(gw.episodes("a-frieren", "saison-1", "anime_sama", "vostfr"))
-    assert first["episodes"][0]["players"][0]["host"] == "vidmoly"
-    assert first["wrapper"]["state"] in ("queued", "running", "failed")
+    # First view: the build starts with this entity's own pages only, the page has no fiche to show yet
+    first = asyncio.run(gw.fiche("a-frieren"))
+    assert first["state"] in ("queued", "running", "failed") and first["fiche"] is None
     _wait(gw.wrapper, "frieren")
     query, version, allowed, order = builds[0]
     assert (query, version, order) == ("Frieren", "vostfr", ["ANIMESAMA", "VOIRANIME"])
     assert allowed["ANIMESAMA"] == {"frieren"}
     assert allowed["VOIRANIME"] == {"sousou-no-frieren", "sousou-no-frieren-2", "sousou-no-frieren-vf"}
 
-    # Ready: verified links first on the Anime-Sama variant, never mixed into the VoirAnime one
-    gw.wrapper._snapshots[gw.wrapper._id("frieren", "vostfr")] = _snapshot()
+    # Ready: one list of seasons, the one YoitsuWrap made (a season only it found included)
+    snap = _snapshot()
+    snap["anime"].update(cover="", synopsis="Synopsis de YoitsuWrap")
+    snap["seasons"].append({"label": "OAV", "key": "oav", "episodes": [{"num": 1, "link": "https://cdn.test/oav.mp4", "source": "voiranime"}]})
+    gw.wrapper._snapshots[gw.wrapper._id("frieren", "vostfr")] = snap
     gw.wrapper._jobs.clear()
-    ready = asyncio.run(gw.episodes("a-frieren", "saison-1", "anime_sama", "vostfr"))
-    assert ready["wrapper"]["state"] == "ready"
-    assert ready["episodes"][0]["players"][0]["host"] == "YoitsuWrap"
-    va = asyncio.run(gw.episodes("a-frieren", "saison-1", "voiranime", "vostfr"))
-    assert all(not e.get("verified") for e in va["episodes"])
+    ready = asyncio.run(gw.fiche("a-frieren"))
+    assert ready["state"] == "ready"
+    assert [(s["key"], s["episodes"], s["sources"]) for s in ready["fiche"]["seasons"] if not s.get("is_scans")] == [
+        ("saison-1", 3, ["anime_sama", "voiranime"]), ("oav", 1, ["voiranime"])]
+    assert any(s.get("is_scans") for s in ready["fiche"]["seasons"])
+    assert ready["fiche"]["synopsis"]["text"] == "Synopsis de YoitsuWrap"
+
+    # Its episodes, whatever source the page asked for: each says where it comes from
+    eps = asyncio.run(gw.episodes("a-frieren", "saison-1", "voiranime", "vostfr"))
+    assert eps["from_wrapper"] and eps["variant"]["source"] == "anime_sama"
+    assert [(e["num"], e["source"]) for e in eps["episodes"]] == [(1, "anime_sama"), (2, "voiranime"), (3, "anime_sama")]
+    assert eps["episodes"][0]["players"][1]["host"] == "vidmoly"   # the API player behind the verified link
+
+    # A season only YoitsuWrap knows gets history keys of its own
+    oav = asyncio.run(gw.episodes("a-frieren", "oav", "", "vostfr"))
+    assert oav["variant"]["source"] == "voiranime" and oav["variant"]["history_keys"] == [{"title": "Frieren", "season": "OAV"}]
     assert gw.wrapper_status("a-frieren")["state"] == "ready"
 
 

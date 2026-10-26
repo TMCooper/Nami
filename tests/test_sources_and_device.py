@@ -1,11 +1,15 @@
 import asyncio
+import os
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.routers import device_download as device_module
+from backend.routers import fiche_download as fiche_module
+from backend.services import download_service as download_module
+from backend.services import wrapper_download
+from backend.services.cache_service import cache_service
 from backend.services import source_health as health_module
 from backend.services.source_health import SourceHealth
 from backend.yoitsu.index import Entry
@@ -80,41 +84,112 @@ def test_down_sources_are_skipped_without_waiting(tmp_path, monkeypatch, setting
     assert asyncio.run(gw.get_info("voiranime", "Frieren")) == []
 
 
-def test_device_download_validates_and_explains_failures(monkeypatch):
-    assert client.get("/api/device-download").status_code == 422          # no url at all
-    assert client.get("/api/device-download", params={"url": "ftp://x"}).status_code == 400
-
-    monkeypatch.setattr(device_module.shutil, "which", lambda name: None)
-    res = client.get("/api/device-download", params={"url": "https://cdn.test/a/master.m3u8"})
-    assert res.status_code == 503 and "ffmpeg" in res.json()["detail"]
-
-    monkeypatch.setattr(device_module.shutil, "which", lambda name: "ffmpeg")
-
-    async def nothing(url, source="anime_sama"):
-        return {"stream_url": None}
-    monkeypatch.setattr(device_module.catalog_service, "resolve_stream", nothing)
-    res = client.get("/api/device-download", params={"url": "https://vidmoly.net/embed-x.html"})
-    assert res.status_code == 422 and "téléchargeable" in res.json()["detail"]
+FOUND = {"title": "Frieren", "label": "Saison 1", "cover": "",
+         "episodes": [{"num": 1, "link": "https://cdn.test/1/master.m3u8", "source": "anime_sama"},
+                      {"num": 2, "link": "https://cdn.test/2/master.m3u8", "source": "voiranime"}]}
 
 
-def test_first_playable_player_wins():
-    async def resolve(url, source="anime_sama"):
-        return {"stream_url": "https://cdn.test/v/master.m3u8", "stream_type": "m3u8"} if "good" in url else {"stream_url": None}
+def _fake_season(items, workers):
+    """What YoitsuWrap's download does to the items, without the network: progress, then the file."""
+    for item in items:
+        item.hook({"status": "downloading", "downloaded_bytes": 50, "fragment_index": 1, "fragment_count": 4, "speed": 2e6, "eta": 3})
+        assert item.progress == 25.0
+        if item.cancelled:
+            item.status = "cancelled"
+            continue
+        os.makedirs(os.path.dirname(item.target), exist_ok=True)
+        with open(item.target, "wb") as f:
+            f.write(b"\0" * 200)
+        item.hook({"status": "finished", "total_bytes": 200})
+        item.status, item.file_path = "completed", item.target
+        item._changed()
+    return items
 
-    original = device_module.catalog_service.resolve_stream
-    device_module.catalog_service.resolve_stream = resolve
+
+def test_fiche_downloads_explain_why_they_cannot_start(monkeypatch):
+    async def answer(error):
+        async def download_items(eid, season, version, nums):
+            return {"error": error} if error else {**FOUND, "episodes": []}
+        return download_items
+
+    for error, code in (("not_found", 404), ("building", 409), ("expired", 409), (None, 404)):
+        monkeypatch.setattr(fiche_module.yoitsu_gateway, "download_items", asyncio.run(answer(error)))
+        res = client.post("/api/device-download/jobs", json={"anime_id": "a-frieren", "season": "saison-1"})
+        assert res.status_code == code, error
+    assert client.post("/api/downloads/fiche", json={"anime_id": "abc", "season": "s"}).status_code == 404
+    assert client.post("/api/downloads/fiche", json={"anime_id": "a-x", "season": "s", "version": "jp"}).status_code == 422
+
+
+def test_episodes_for_a_device_are_prepared_then_sent_and_removed(tmp_path, monkeypatch):
+    jobs = fiche_module.DeviceJobs(folder=str(tmp_path))
+    monkeypatch.setattr(fiche_module, "device_jobs", jobs)
+    monkeypatch.setattr(fiche_module.wrapper_download, "download_season", _fake_season)
+
+    async def download_items(eid, season, version, nums):
+        return {**FOUND, "episodes": [e for e in FOUND["episodes"] if not nums or e["num"] in nums]}
+    monkeypatch.setattr(fiche_module.yoitsu_gateway, "download_items", download_items)
+
+    started = client.post("/api/device-download/jobs", json={"anime_id": "a-frieren", "season": "saison-1", "episodes": [2]}).json()["jobs"]
+    assert [(j["num"], j["source"]) for j in started] == [(2, "voiranime")]
+    job_id = started[0]["id"]
+    jobs._executor.shutdown(wait=True)
+    status = client.get("/api/device-download/jobs", params={"id": job_id}).json()["jobs"][0]
+    assert status["status"] == "completed" and status["progress"] == 100.0
+
+    res = client.get(f"/api/device-download/jobs/{job_id}/file")
+    assert res.status_code == 200 and len(res.content) == 200
+    assert res.headers["content-disposition"] == ('attachment; filename="Frieren - Saison 1 - VOSTFR - ep_2.mp4"; '
+                                                  "filename*=UTF-8''Frieren%20-%20Saison%201%20-%20VOSTFR%20-%20ep_2.mp4")
+    path = jobs.get(job_id)["item"].target
+    assert client.delete(f"/api/device-download/jobs/{job_id}").status_code == 200
+    assert not os.path.exists(path) and os.listdir(tmp_path) == []
+    assert client.get(f"/api/device-download/jobs/{job_id}/file").status_code == 404
+
+
+def test_server_downloads_follow_yoitsuwrap_progress(tmp_path, monkeypatch):
+    saved = []
+    monkeypatch.setattr(download_module, "save_json", lambda path, data, **kw: saved.append(data))
+    monkeypatch.setattr(download_module.settings_service, "get_root_folder", lambda: str(tmp_path))
+    monkeypatch.setattr(download_module.wrapper_download, "download_season", _fake_season)
+    service = download_module.DownloadService.__new__(download_module.DownloadService)
+    service.__init__()
+    service.tasks = {}
+
+    tasks = service.add_wrapper_season("Re:Zero", "Saison 1", "vf", FOUND["episodes"])
+    cancelled = tasks[1]
+    service.cancel_task(cancelled.id)
+    service._batches.shutdown(wait=True)
+    done = tasks[0]
+    assert done.status == "completed" and done.progress == 100.0 and done.mode == "wrapper"
+    assert done.season == "Saison 1 VF" and done.source == "anime_sama"
+    assert done.file_path.replace("\\", "/").endswith("nami/Anime/ReZero/Saison_1/vf/1.mp4")
+    assert cancelled.status == "cancelled" and not os.path.exists(cancelled.file_path)
+    assert saved and saved[-1][0]["mode"] == "wrapper"
+
+    # The library and the episode list find these files
+    lib = cache_service.scan_downloaded_library(str(tmp_path))
+    assert [(s["season_name"], [e["num"] for e in s["episodes"]]) for s in lib[0]["seasons"]] == [("Saison 1 VF", ["1"])]
+    status = client.get("/api/episodes/download-status", params={"anime_title": "Re:Zero", "season": "Saison 1 VF",
+                                                                 "label": "Saison 1", "version": "vf"})
+    assert list(status.json()["downloaded_episodes"]) == ["1"]
+
+
+def test_progress_hooks_reach_the_yt_dlp_yoitsuwrap_creates(tmp_path):
+    wrapper_download.install()
+    from YoitsuWrap import Episode as episode_module
+    item = wrapper_download.Item(title="T", season="S", version="vostfr", num=3, link="", source="", root=str(tmp_path))
+    with wrapper_download._hooks_lock:
+        wrapper_download._hooks[wrapper_download._target_key(item.target)] = item.hook
     try:
-        found = asyncio.run(device_module._playable(["https://dead.test/embed", "https://good.test/embed"]))
-        assert found == ("https://cdn.test/v/master.m3u8", "m3u8")
-        assert asyncio.run(device_module._playable(["https://cdn.test/v.mp4"])) == ("https://cdn.test/v.mp4", "mp4")
+        ydl = episode_module.yt_dlp.YoutubeDL({"outtmpl": item.target})
+        assert item.hook in ydl.params["progress_hooks"] and ydl.params["quiet"]
+        other = episode_module.yt_dlp.YoutubeDL({"quiet": True})          # the health checks are untouched
+        assert not other.params.get("progress_hooks")
     finally:
-        device_module.catalog_service.resolve_stream = original
-
-
-def test_download_names_are_safe_everywhere():
-    header = device_module._content_disposition('Frieren : Saison 1/ép "1"')
-    assert header == ('attachment; filename="Frieren  Saison 1p 1.mp4"; '
-                      "filename*=UTF-8''Frieren%20%20Saison%201%C3%A9p%201.mp4")
+        wrapper_download._hooks.clear()
+    item.cancelled = True
+    with pytest.raises(wrapper_download.DownloadCancelled):
+        item.hook({"status": "downloading"})
 
 
 HXD = "https://voir-anime.to/anime/high-school-dxd/"
@@ -192,3 +267,26 @@ def test_search_keeps_what_the_source_matched_through_other_names(tmp_path, monk
     monkeypatch.setattr(gateway_module.catalog_service, "_search_voiranime", va_search)
     titles = [r["title"] for r in asyncio.run(gw.search("attaque des titans"))]
     assert titles[0] == "Shingeki no Kyojin" and "Attaque des Titans Junior High-school" in titles
+
+
+def test_search_shows_one_card_per_franchise_like_yoitsuwrap(tmp_path, monkeypatch):
+    from backend.yoitsu import gateway as gateway_module
+    gw = _make_gateway(tmp_path, monkeypatch, [], HXD_ROWS, [])
+
+    async def as_search(q):
+        return []
+
+    async def va_search(q, group=True, cover_wait=None):
+        return [{"title": t, "source": "voiranime", "url": u, "cover": ""} for t, u in (
+            ("High School DxD", HXD), ("High School DxD New", HXD_NEW), ("High School DxD BorN", HXD_BORN))]
+
+    monkeypatch.setattr(gateway_module.catalog_service, "_search_anime_sama", as_search)
+    monkeypatch.setattr(gateway_module.catalog_service, "_search_voiranime", va_search)
+    results = asyncio.run(gw.search("high school dxd"))
+    assert [r["title"] for r in results] == ["High School DxD"]
+    assert set(results[0]["alt_titles"]) == {"High School DxD New", "High School DxD BorN"}
+
+    # The API naming another work (its best match is not among these posts) groups nothing
+    other = _make_gateway(tmp_path / "other", monkeypatch, [], [{**HXD_ROWS[0], "base_url": "https://voir-anime.to/anime/x/"}], [])
+    other.aliases.union = lambda *a, **k: pytest.fail("nothing to learn")
+    asyncio.run(other.group_like_wrapper([Entry("voiranime", HXD, "High School DxD"), Entry("voiranime", HXD_BORN, "Z BorN")]))

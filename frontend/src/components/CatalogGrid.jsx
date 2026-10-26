@@ -5,22 +5,18 @@ import AnimeCard, { AnimeCardSkeleton } from './AnimeCard';
 import ContinueCard from './ContinueCard';
 import { DEFAULT_ANIME_COVER } from '../utils/placeholders';
 
-// Merged entities list every source that has the anime
-const hasSource = (anime, source) =>
-  anime.source === source || (anime.sources || []).some((s) => s.source === source);
-
 export { DEFAULT_ANIME_COVER };
 
 const PAGE_SIZE = 48; // catalogue cards rendered per step: the full catalogue is hundreds of cards
 
 // Renders a long list a page at a time, the next page when the end comes near
-// (back to the first page when the list itself changes: new results or another source filter)
-function useProgressiveList(items, results, source) {
+// (back to the first page when the list itself changes)
+function useProgressiveList(items) {
   const [count, setCount] = useState(PAGE_SIZE);
   // A callback ref: the sentinel only appears once the list has loaded, the observer must follow it
   const [sentinel, setSentinel] = useState(null);
 
-  useEffect(() => { setCount(PAGE_SIZE); }, [results, source]);
+  useEffect(() => { setCount(PAGE_SIZE); }, [items]);
 
   useEffect(() => {
     if (!sentinel || count >= items.length || !('IntersectionObserver' in window)) return undefined;
@@ -50,7 +46,6 @@ export default function CatalogGrid({
   results = [],
   isLoading,
   searchQuery,
-  activeSource = 'all',
   continueWatching = [],
   recentAnimes = [],
   randomSuggestions = [],
@@ -63,14 +58,12 @@ export default function CatalogGrid({
   onSelectAnime,
   onResumeEpisode
 }) {
-  const bySource = (anime) => activeSource === 'all' || hasSource(anime, activeSource);
-  // Unlinked continue items have no source: they always show
-  const filteredContinueWatching = (continueWatching || []).filter((item) => activeSource === 'all' || !item.source || item.source === activeSource);
-  const filteredWatchlist = (watchlist || []).filter(bySource);
-  const filteredRecentAnimes = (recentAnimes || []).filter(bySource);
-  const filteredRandomSuggestions = (randomSuggestions || []).filter(bySource);
-  const filteredResults = (results || []).filter(bySource);
-  const catalogue = useProgressiveList(filteredResults, results, activeSource);
+  const filteredContinueWatching = continueWatching || [];
+  const filteredWatchlist = watchlist || [];
+  const filteredRecentAnimes = recentAnimes || [];
+  const filteredRandomSuggestions = randomSuggestions || [];
+  const filteredResults = results || [];
+  const catalogue = useProgressiveList(filteredResults);
 
   const isBrowsingHome = !searchQuery.trim();
 

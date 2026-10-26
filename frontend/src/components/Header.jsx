@@ -1,18 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, Download, Settings, RefreshCw, Home, History, BarChart3, HardDrive, Bookmark, X } from 'lucide-react';
 
-const SOURCES = [
-  { key: 'all', label: 'Toutes les sources' },
-  { key: 'anime_sama', label: 'Anime-Sama' },
-  { key: 'voiranime', label: 'VoirAnime' }
-];
-
 export default function Header({
   searchQuery,
   setSearchQuery,
   onSearch,
-  activeSource,
-  setActiveSource,
   activeTab,
   setActiveTab,
   activeDownloadsCount,
@@ -60,7 +52,7 @@ export default function Header({
 
   const handleRefreshCatalog = () => {
     setIsRefreshing(true);
-    fetch(`/api/catalog/update?source=${activeSource}`, { method: 'POST' })
+    fetch('/api/catalog/update?source=all', { method: 'POST' })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -233,22 +225,6 @@ export default function Header({
             {tab.count > 0 && <span className="chip-count">{tab.count}</span>}
           </button>
         ))}
-        {activeTab === 'catalog' && (
-          <>
-            <span className="chip-divider" aria-hidden="true" />
-            {SOURCES.map((src) => (
-              <button
-                key={src.key}
-                type="button"
-                className={`chip${activeSource === src.key ? ' active' : ''}`}
-                aria-pressed={activeSource === src.key}
-                onClick={() => setActiveSource(src.key)}
-              >
-                {src.label}
-              </button>
-            ))}
-          </>
-        )}
       </nav>
     </header>
   );

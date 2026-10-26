@@ -2,11 +2,11 @@
 
 YoitsuWrap's Anime.search_by_name is the reference way to get an anime: every season, every
 episode link resolved by the API, each one checked with yt-dlp, the second API filling the
-episodes the first one lacks. It is also slow (about 50 s for Frieren), so it runs here in a
-single background worker, never in a request, and its result is kept as a snapshot:
+episodes the first one lacks. It is also slow (about 50 s for Frieren), so it runs here in
+background workers, never in a request, and its result is kept as a snapshot, the fiche of the anime:
 
-- the first view of an anime page starts the build; until it is ready the page uses the
-  players of the source APIs;
+- the first view of an anime page starts the build and the page waits for it (no duplicate
+  seasons or episodes guessed from the APIs meanwhile);
 - the episode links are signed and expire (Anime-Sama: 12 h). An expired snapshot is rebuilt
   on the next view, and « Actualiser » on the anime page rebuilds it at once.
 """
@@ -28,6 +28,7 @@ WRAPPER_DIR = os.path.join(DATA_DIR, "cache", "yoitsu")
 DEFAULT_LIFETIME = 6 * 3600     # links without an expiry in their query are trusted this long
 EXPIRY_MARGIN = 600             # a link this close to its expiry is treated as expired
 RETRY_FAILED = 900              # a failed build is retried after this delay
+BUILD_WORKERS = 2               # a long build (One Piece) must not hold every other anime back
 SOURCE_NAMES = {"ANIMESAMA": "anime_sama", "VOIRANIME": "voiranime"}
 WRAPPER_HOST = "YoitsuWrap"
 
@@ -188,7 +189,7 @@ class WrapperStore:
         self._lock = threading.RLock()
         self._snapshots: Dict[str, dict] = {}
         self._jobs: Dict[str, dict] = {}
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yoitsu-build")
+        self._executor = ThreadPoolExecutor(max_workers=BUILD_WORKERS, thread_name_prefix="yoitsu-build")
 
     @staticmethod
     def _id(key: str, version: str) -> str:
@@ -277,37 +278,33 @@ class WrapperStore:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
 
-def with_wrapper_links(episodes: List[dict], season: Optional[dict]) -> List[dict]:
-    """Episodes of a source API, with the links YoitsuWrap verified put first.
+def wrapper_episodes(season: dict, api_episodes: List[dict], fresh: bool, api_source: str = "") -> List[dict]:
+    """Episodes of a season of the YoitsuWrap fiche: its list is the reference.
 
-    The API players stay behind them as fallbacks (a link can still expire or break), and an
-    episode only YoitsuWrap found is added.
+    Each episode says which source YoitsuWrap took it from. Its verified link comes first while it is
+    valid (after the API players once expired); the players of the source API stay behind it as
+    fallbacks. An episode only the API lists (YoitsuWrap could not check it) is kept, marked unverified.
     """
-    if not season:
-        return episodes
-    verified = {e["num"]: e for e in season.get("episodes") or []}
-    out, seen = [], set()
-    for ep in episodes:
+    api_by_num = {}
+    for ep in api_episodes or []:
         try:
-            num = int(ep.get("num"))
+            api_by_num.setdefault(int(ep.get("num")), ep)
         except (TypeError, ValueError):
-            out.append(ep)
             continue
-        seen.add(num)
-        w = verified.get(num)
-        if not w:
-            out.append(ep)
-            continue
-        fallbacks = ep.get("players") or ([{"host": "VoirAnime" if "voir-anime" in (ep.get("embed_url") or "") else "Source",
-                                            "embed_url": ep["embed_url"]}] if ep.get("embed_url") else [])
-        players = [{"host": WRAPPER_HOST, "embed_url": w["link"], "verified": True}]
-        players += [p for p in fallbacks if p.get("embed_url") != w["link"]]
-        out.append({**ep, "players": players, "verified": True})
-    for num, w in sorted(verified.items()):
-        if num not in seen:
-            out.append({"num": num, "title": f"Épisode {num}", "embed_url": w["link"], "verified": True,
-                        "players": [{"host": WRAPPER_HOST, "embed_url": w["link"], "verified": True}]})
-    out.sort(key=lambda e: int(e["num"]) if str(e.get("num", "")).isdigit() else 10 ** 6)
+    out = []
+    for w in season.get("episodes") or []:
+        api = api_by_num.pop(w["num"], None) or {}
+        fallbacks = api.get("players") or ([{"host": "VoirAnime" if "voir-anime" in api["embed_url"] else "Source",
+                                             "embed_url": api["embed_url"]}] if api.get("embed_url") else [])
+        fallbacks = [p for p in fallbacks if p.get("embed_url") and p["embed_url"] != w["link"]]
+        verified = {"host": WRAPPER_HOST, "embed_url": w["link"], "verified": fresh, "source": w.get("source")}
+        players = [verified, *fallbacks] if fresh or not fallbacks else [*fallbacks, verified]
+        out.append({**api, "num": w["num"], "title": api.get("title") or f"Épisode {w['num']}",
+                    "embed_url": players[0]["embed_url"], "players": players,
+                    "source": w.get("source") or api_source, "verified": fresh})
+    for num, api in sorted(api_by_num.items()):
+        out.append({**api, "num": num, "source": api.get("source") or api_source, "verified": False})
+    out.sort(key=lambda e: int(e["num"]))
     return out
 
 

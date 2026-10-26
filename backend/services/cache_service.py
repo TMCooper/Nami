@@ -249,6 +249,27 @@ class CacheService:
         return ""
 
     # --- Scan Local Downloaded Media on Disk ---
+    @staticmethod
+    def _video_files(folder: str) -> List[dict]:
+        episodes = []
+        for ep_file in sorted(os.listdir(folder)):
+            # yt-dlp's ".temp.mp4" is a download still being finished
+            if not ep_file.lower().endswith(('.mp4', '.mkv', '.webm')) or ".temp." in ep_file.lower():
+                continue
+            full_ep_path = os.path.join(folder, ep_file)
+            m = re.search(r'\d+', ep_file)
+            episodes.append({
+                "num": str(int(m.group())) if m else "1",
+                "filename": ep_file,
+                "file_path": full_ep_path,
+                "thumbnail": f"/api/stream/thumbnail?file_path={quote(full_ep_path)}",
+                "size_mb": round(os.path.getsize(full_ep_path) / (1024 * 1024), 1),
+                "is_scan": False,
+                "is_downloaded": True
+            })
+        episodes.sort(key=lambda e: int(e["num"]))
+        return episodes
+
     def scan_downloaded_library(self, root_folder: str) -> List[dict]:
         candidate_bases = [
             os.path.join(root_folder, "nami", "anime"),
@@ -257,10 +278,13 @@ class CacheService:
 
         results = []
         seen_titles = set()
+        seen_bases = set()
 
         for base_dir in candidate_bases:
-            if not os.path.exists(base_dir):
+            real_base = os.path.normcase(os.path.realpath(base_dir))
+            if not os.path.exists(base_dir) or real_base in seen_bases:
                 continue
+            seen_bases.add(real_base)
 
             try:
                 for anime_folder in os.listdir(base_dir):
@@ -269,8 +293,6 @@ class CacheService:
                         continue
 
                     display_title = anime_folder.replace("_", " ")
-                    if display_title.lower() in seen_titles:
-                        continue
 
                     cover = self._find_anime_cover(display_title, anime_path)
                     seasons_found = []
@@ -317,38 +339,33 @@ class CacheService:
                                     "episodes": chapters_found
                                 })
                         else:
-                            # Standard video season folder
-                            episodes_found = []
-                            for ep_file in sorted(os.listdir(season_path)):
-                                if ep_file.lower().endswith(('.mp4', '.mkv', '.webm')):
-                                    full_ep_path = os.path.join(season_path, ep_file)
-                                    file_size_mb = round(os.path.getsize(full_ep_path) / (1024 * 1024), 1)
-                                    
-                                    # Extract episode number
-                                    ep_num = "1"
-                                    m = re.search(r'\d+', ep_file)
-                                    if m:
-                                        ep_num = str(int(m.group()))
-
-                                    episodes_found.append({
-                                        "num": ep_num,
-                                        "filename": ep_file,
-                                        "file_path": full_ep_path,
-                                        "thumbnail": f"/api/stream/thumbnail?file_path={quote(full_ep_path)}",
-                                        "size_mb": file_size_mb,
-                                        "is_scan": False,
-                                        "is_downloaded": True
+                            # Video season folder: episodes in it (old downloads) and in its version
+                            # folders (YoitsuWrap downloads: <season>/vostfr/1.mp4, <season>/vf/1.mp4)
+                            places = [(season_path, display_season, season_folder)]
+                            for version, suffix in (("vostfr", ""), ("vf", " VF")):
+                                version_path = os.path.join(season_path, version)
+                                if os.path.isdir(version_path):
+                                    places.append((version_path, f"{display_season}{suffix}", f"{season_folder}/{version}"))
+                            for place, name, folder in places:
+                                episodes_found = self._video_files(place)
+                                if episodes_found:
+                                    seasons_found.append({
+                                        "season_name": name,
+                                        "folder": folder,
+                                        "is_scans": False,
+                                        "episodes": episodes_found
                                     })
 
-                            if episodes_found:
-                                seasons_found.append({
-                                    "season_name": display_season,
-                                    "folder": season_folder,
-                                    "is_scans": False,
-                                    "episodes": episodes_found
-                                })
-
-                    if seasons_found:
+                    if seasons_found and display_title.lower() in seen_titles:
+                        known = next(r for r in results if r["anime_title"].lower() == display_title.lower())
+                        known["seasons"] += seasons_found
+                        for key, scans in (("total_episodes", False), ("total_chapters", True)):
+                            known[key] += sum(len(s["episodes"]) for s in seasons_found if bool(s.get("is_scans")) == scans)
+                        known["total_size_mb"] = round(known["total_size_mb"] + sum(
+                            ep.get("size_mb", 0) for s in seasons_found for ep in s["episodes"]), 1)
+                        known["has_videos"] = known["total_episodes"] > 0
+                        known["has_scans"] = known["total_chapters"] > 0
+                    elif seasons_found:
                         seen_titles.add(display_title.lower())
                         total_eps = sum(len(s["episodes"]) for s in seasons_found if not s.get("is_scans"))
                         total_chaps = sum(len(s["episodes"]) for s in seasons_found if s.get("is_scans"))

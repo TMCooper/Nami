@@ -13,6 +13,7 @@ import os
 import re
 import time
 import asyncio
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -26,8 +27,8 @@ from backend.services.source_health import source_health
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.aliases import AliasIndex
 from backend.yoitsu.anilist import AniListClient, media_titles
-from backend.yoitsu.index import Entry, EntityIndex, build_entity, entity_id, entry_rank, key_from_entity_id
-from backend.yoitsu.wrapper_store import with_wrapper_links, wrapper_store
+from backend.yoitsu.index import Entry, EntityIndex, _exact_key, build_entity, entity_id, entry_rank, key_from_entity_id
+from backend.yoitsu.wrapper_store import wrapper_episodes, wrapper_store
 from backend.yoitsu.normalize import (
     franchise_of, is_valid_key, legacy_title_from_url, season_key, slug_of, split_version, strong_root, title_key
 )
@@ -46,6 +47,10 @@ ENRICH_PER_SEARCH = 4
 MAX_AS_PAGES = 3
 FLUSH_DELAY = 10.0
 PREVIEW_SYNOPSIS = 280          # characters of synopsis in a card's hover preview
+GROUP_LOOKUPS = 8               # VoirAnime cards of a search checked against their API's franchise grouping
+GROUP_WAIT = 4.0                # what a search waits for them (late answers still group the next search)
+GROUP_TTL = 3600
+API_EPISODES_WAIT = 8.0         # source API players behind the YoitsuWrap links of a fiche: bounded
 SYNOPSIS_STUB = re.compile(r"^saison\s+\d+\s+de\b", re.IGNORECASE)
 AS_COVER_SLUG = re.compile(r"/Anime-Sama/IMG/(?:img/)?contenu/([A-Za-z0-9-]+)\.(?:jpe?g|png|webp)", re.IGNORECASE)
 VA_EPISODE_PATH = re.compile(r"^/anime/([^/]+)/[^/]+")   # /anime/<post slug>/<episode slug>/
@@ -100,6 +105,7 @@ class YoitsuGateway:
         self._flush_task: Optional[asyncio.Task] = None
         self._vf_probe: dict = {}
         self._probe_semaphore = asyncio.Semaphore(3)
+        self._grouped: Dict[str, float] = {}   # VoirAnime title -> when its franchise was grouped
         self.wrapper = wrapper_store
 
     # --- plumbing ---
@@ -252,19 +258,21 @@ class YoitsuGateway:
         return self.index.group(entries)
 
     async def search(self, query: str = "", source: str = "all") -> list:
+        """Every source at once: YoitsuWrap makes one fiche per anime out of all of them (source is kept for old clients)."""
         self.ensure_catalog()
         q = query.strip()
         if not q:
-            return await self.catalogue(source)
+            return await self.catalogue()
 
         tasks = []
         for term in get_canonical_search_queries(q):
-            if source in ("all", "anime_sama") and source_health.usable("anime_sama"):
+            if source_health.usable("anime_sama"):
                 tasks.append(catalog_service._search_anime_sama(term))
-            if source in ("all", "voiranime") and source_health.usable("voiranime"):
+            if source_health.usable("voiranime"):
                 tasks.append(catalog_service._search_voiranime(term, group=False, cover_wait=0))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         entries = [e for res in results if isinstance(res, list) for e in self._entries(res)]
+        await self.group_like_wrapper(entries)
         entities = self.group(entries)
         # The source's own score counts too: it matches names Nami does not know ("attaque des titans")
         api_scores = {}
@@ -287,6 +295,42 @@ class YoitsuGateway:
         self._enrich_in_background([e for _, e in scored])
         return [{**self.client_entity(e), "_score": s} for s, e in scored]
 
+    async def group_like_wrapper(self, entries: List[Entry]):
+        """VoirAnime has one post per season; its API's getInfoAnime groups a franchise's posts the way
+        YoitsuWrap builds the fiche (« High School DxD », « … New », « … BorN » are one anime).
+
+        The posts of a search it groups together become one card. A lookup still running when the wait
+        ends keeps going and groups the next search.
+        """
+        siblings = {title_key(split_version(e.title)[0]) for e in entries}
+        posts = [e for e in entries if e.source == "voiranime"]
+        cards, picked = set(), []
+        for e in posts:
+            name = split_version(e.title)[0]
+            key = self.index.canonical_key(e, siblings)
+            if key in cards or time.monotonic() - self._grouped.get(name, -GROUP_TTL) < GROUP_TTL:
+                continue
+            cards.add(key)
+            picked.append(name)
+        tasks = [self._spawn(self._group_franchise(name, posts, siblings)) for name in picked[:GROUP_LOOKUPS]]
+        if tasks:
+            await asyncio.wait(tasks, timeout=GROUP_WAIT)
+
+    async def _group_franchise(self, name: str, posts: List[Entry], siblings: set):
+        rows = await self.get_info("voiranime", name)
+        self._grouped[name] = time.monotonic()
+        slugs = {slug_of(u) for r in rows for u in (r.get("base_url"), r.get("url"), r.get("_vostfr_url"), r.get("_vf_url")) if u}
+        root = slug_of(rows[0].get("base_url") or "") if rows else ""
+        members = [e for e in posts if e.slug in slugs]
+        # The API answers with its best match: it must be one of these posts, else it named another work
+        if not root or not any(e.slug == root for e in members) or not any(split_version(e.title)[0] == name for e in members):
+            return
+        anchor_entry = next(e for e in members if e.slug == root)
+        anchor = self.index.canonical_key(anchor_entry, siblings)
+        keys = {k for e in members for k in (self.index.canonical_key(e, siblings), _exact_key(e.title))}
+        if any(self.aliases.find(k) != self.aliases.find(anchor) for k in keys):
+            self._learn(anchor, keys - {anchor})
+
     async def _fill_entity_covers(self, entities: list, entries: List[Entry]):
         """Covers are scraped only for cards that have none (one VoirAnime post per card)."""
         missing = [e for e in entities if not e.get("cover") and e["source"] == "voiranime"][:15]
@@ -298,15 +342,11 @@ class YoitsuGateway:
             if item.get("cover"):
                 entity["cover"] = item["cover"]
 
-    async def catalogue(self, source: str = "all") -> list:
-        tasks = []
-        if source in ("all", "anime_sama"):
-            tasks.append(catalog_service._search_anime_sama(""))
-        if source in ("all", "voiranime"):
-            tasks.append(catalog_service._search_voiranime("", group=False))
+    async def catalogue(self) -> list:
+        tasks = [catalog_service._search_anime_sama(""), catalog_service._search_voiranime("", group=False)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         entities = self.group([e for res in results if isinstance(res, list) for e in self._entries(res)], remember="new")
-        if not entities and source in ("all", "anime_sama"):
+        if not entities:
             return await self.random(24)
         return [self.client_entity(e) for e in entities]
 
@@ -882,14 +922,95 @@ class YoitsuGateway:
         })
         return out
 
+    # --- fiche (YoitsuWrap) ---
+    async def fiche(self, eid: str, version: str = "vostfr", refresh: bool = False) -> Optional[dict]:
+        """The anime as YoitsuWrap builds it: its seasons and episodes are the ones the page shows.
+
+        The first view starts the build and the page waits for it; an expired fiche is still shown
+        while YoitsuWrap rebuilds it (« Actualiser » forces that rebuild).
+        """
+        details = await self.details(eid, track_recent=False)
+        if not details:
+            return None
+        job = await self._wrapper_job(details)
+        if not job:
+            return {"state": "unavailable", "version": version, "fiche": None, "progress": None,
+                    "error": "Aucune source disponible pour YoitsuWrap"}
+        key, query, allowed, order, _ = job
+        status = self.wrapper.ensure(key, version, query, allowed, order, force=refresh)
+        snap = self.wrapper.get(key, version)
+        return {**status, "version": version, "fiche": self._fiche_of(details, snap) if snap else None}
+
+    @staticmethod
+    def _fiche_of(details: dict, snap: dict) -> dict:
+        anime = snap.get("anime") or {}
+        seasons, keys = [], set()
+        for s in snap.get("seasons") or []:
+            if not s.get("episodes") or s["key"] in keys:
+                continue
+            keys.add(s["key"])
+            seasons.append({"key": s["key"], "label": s["label"], "episodes": len(s["episodes"]),
+                            "sources": sorted({e["source"] for e in s["episodes"] if e.get("source")})})
+        # YoitsuWrap keeps scans in its own Scan object: the page reads them as before
+        seasons += [{"key": s["key"], "label": s["label"], "is_scans": True, "episodes": None,
+                     "sources": _dedup(v["source"] for v in s.get("variants") or [])}
+                    for s in details.get("seasons") or [] if s.get("is_scans")]
+        cover = anime.get("cover") if is_usable_cover(anime.get("cover") or "") else ""
+        text = (anime.get("synopsis") or "").strip()
+        return {
+            "title": anime.get("title") or details["title"],
+            "cover": client_cover_url(cover) if cover else details.get("cover", ""),
+            "synopsis": {"text": text, "lang": "fr", "origin": "yoitsuwrap"} if text else details.get("synopsis"),
+            "sources": snap.get("sources") or [],
+            "seasons": seasons,
+        }
+
+    async def download_items(self, eid: str, season: str, version: str, nums: List[int]) -> dict:
+        """Episodes of a fiche season to download with YoitsuWrap: {title, label, cover, episodes: [{num, link, source}]}.
+
+        error: 'not_found' (no such anime or season), 'building' (no fiche yet) or 'expired' (its links are
+        being renewed: a rebuild is started, the download can be asked again once it is ready).
+        """
+        details = await self.details(eid, track_recent=False)
+        job = await self._wrapper_job(details) if details else None
+        if not job:
+            return {"error": "not_found"}
+        key, query, allowed, order, _ = job
+        snap = self.wrapper.get(key, version)
+        if not snap:
+            self.wrapper.ensure(key, version, query, allowed, order)
+            return {"error": "building"}
+        if not self.wrapper.is_fresh(snap):
+            self.wrapper.ensure(key, version, query, allowed, order)
+            return {"error": "expired"}
+        fiche_season = next((s for s in snap["seasons"] if s.get("key") == season), None)
+        if not fiche_season:
+            return {"error": "not_found"}
+        wanted = set(nums)
+        episodes = [e for e in fiche_season["episodes"] if not wanted or e["num"] in wanted]
+        anime = snap.get("anime") or {}
+        return {
+            "title": anime.get("title") or details["title"],
+            "label": fiche_season["label"],
+            "cover": anime.get("cover") or details.get("cover") or "",
+            "episodes": episodes,
+        }
+
     # --- episodes & players ---
     async def episodes(self, eid: str, season: str, source: str = "", version: str = "vostfr", refresh: bool = False) -> Optional[dict]:
         details = await self.details(eid, track_recent=False)
         if not details:
             return None
         season_obj = next((s for s in details["seasons"] if s["key"] == season), None)
+        job = await self._wrapper_job(details)
+        snap = self.wrapper.get(job[0], version) if job else None
+        fiche_season = next((s for s in (snap or {}).get("seasons") or [] if s.get("key") == season and s.get("episodes")), None)
+        if fiche_season and not (season_obj and season_obj.get("is_scans")):
+            return await self._fiche_episodes(details, season_obj, fiche_season, snap, job[0], version, refresh)
         if not season_obj:
             return None
+
+        # No fiche yet (or YoitsuWrap unavailable): the season as the source APIs list it
         variants = season_obj["variants"]
         usable = [v for v in variants if v["available"] is not False]
         variant = (
@@ -902,7 +1023,46 @@ class YoitsuGateway:
                   "is_scans": variant["version"] == "scans", "episodes": [], "anime_id": details["id"]}
         if result["is_scans"]:
             return result  # scans keep using /api/episodes (YoitsuWrap Scan objects)
+        result["episodes"] = await self._api_episodes(variant, refresh)
+        if job and ":" not in season_obj["key"]:
+            key, query, allowed, order, _ = job
+            result["wrapper"] = self.wrapper.ensure(key, variant["version"], query, allowed, order)
+        return result
 
+    async def _fiche_episodes(self, details: dict, season_obj: Optional[dict], fiche_season: dict, snap: dict,
+                              key: str, version: str, refresh: bool) -> dict:
+        """A season of the fiche: YoitsuWrap's episodes, each with the source it was taken from.
+
+        The history keys stay those of the matching season of the source APIs (progress saved before
+        the fiche existed is found again); a season only YoitsuWrap has gets keys of its own.
+        """
+        counts = Counter(e.get("source") for e in fiche_season["episodes"] if e.get("source"))
+        main_source = counts.most_common(1)[0][0] if counts else details.get("source") or "anime_sama"
+        variants = [v for v in (season_obj or {}).get("variants") or [] if v.get("version") == version]
+        variant = next((v for v in variants if v["source"] == main_source), None) or (variants[0] if variants else None)
+        if variant is None:
+            title, label = details["title"], fiche_season["label"]
+            name = label if version == "vostfr" else f"{label} VF"
+            variant = {"source": main_source, "version": version, "url": "", "available": True,
+                       "season_name": name, "season_label": label, "history_title": title,
+                       "history_titles": [title], "history_keys": [{"title": title, "season": name}]}
+        api_episodes = []
+        if variant.get("url") and source_health.usable(variant["source"]):
+            try:
+                api_episodes = await asyncio.wait_for(self._api_episodes(variant, refresh), API_EPISODES_WAIT)
+            except Exception as e:   # the fiche does not depend on them
+                print(f"[Yoitsu] Source players skipped for {variant['url']}: {e!r}")
+        return {
+            "season": {"key": fiche_season["key"], "label": fiche_season["label"]},
+            "variant": variant,
+            "is_scans": False,
+            "anime_id": details["id"],
+            "from_wrapper": True,
+            "episodes": wrapper_episodes(fiche_season, api_episodes, self.wrapper.is_fresh(snap), variant["source"]),
+            "wrapper": self.wrapper.status(key, version),
+        }
+
+    async def _api_episodes(self, variant: dict, refresh: bool = False) -> list:
         if variant["source"] == "anime_sama":
             episodes = await catalog_service.fetch_anime_sama_players(variant["url"], variant["version"], refresh=refresh)
             if not episodes:
@@ -910,22 +1070,9 @@ class YoitsuGateway:
                     season_url=variant["url"], anime_title=variant["history_title"],
                     season_name=variant.get("season_label", variant["season_name"]), version=variant["version"], refresh=refresh
                 )
-        else:
-            va = await catalog_service.get_details(url=variant["url"], source="voiranime", refresh=refresh, track_recent=False)
-            episodes = va.get("episodes", []) if va else []
-
-        # YoitsuWrap builds the anime once (background); its verified links come first, the API players behind
-        job = await self._wrapper_job(details)
-        if job and ":" not in season_obj["key"]:
-            key, query, allowed, order, primary = job
-            version = variant["version"]
-            result["wrapper"] = self.wrapper.ensure(key, version, query, allowed, order, force=refresh)
-            snap = self.wrapper.get(key, version)
-            if self.wrapper.is_fresh(snap) and variant["source"] == primary:
-                wanted = next((s for s in snap["seasons"] if s.get("key") == season_obj["key"]), None)
-                episodes = with_wrapper_links(episodes, wanted)
-        result["episodes"] = episodes
-        return result
+            return episodes or []
+        va = await catalog_service.get_details(url=variant["url"], source="voiranime", refresh=refresh, track_recent=False)
+        return va.get("episodes", []) if va else []
 
     async def _wrapper_job(self, details: dict) -> Optional[tuple]:
         """What YoitsuWrap is asked for an entity: its Anime-Sama title first (else VoirAnime's), with

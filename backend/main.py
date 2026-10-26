@@ -202,11 +202,11 @@ app.add_middleware(
 
 from backend.routers.api import router as api_router
 from backend.routers.stream_proxy import router as proxy_router
-from backend.routers.device_download import router as device_download_router
+from backend.routers.fiche_download import router as fiche_download_router
 
 app.include_router(api_router)
 app.include_router(proxy_router)
-app.include_router(device_download_router)
+app.include_router(fiche_download_router)
 
 # Mount static frontend build if it exists
 FRONTEND_DIST = os.path.join(PROJECT_ROOT, "frontend", "dist")

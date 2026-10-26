@@ -324,3 +324,35 @@ def test_details_built_without_the_api_answer_are_redone(tmp_path, monkeypatch):
     monkeypatch.setattr(gw, "get_info", rows)
     again = asyncio.run(gw.details("a-high-school-dxd"))
     assert {s["label"] for s in again["seasons"]} == {"Saison 1", "New", "BorN"}
+
+
+def test_each_season_gets_its_voiranime_cover(tmp_path, monkeypatch):
+    from backend.yoitsu import gateway as gateway_module
+    monkeypatch.setattr(gateway_module.source_health, "usable", lambda source: True)
+    monkeypatch.setattr(gateway_module, "SEASON_COVER_WAIT", 0.3)
+    gw = _make_gateway(tmp_path, monkeypatch, [], [], [])
+    covers = {HXD: "https://img.test/dxd.jpg", HXD_NEW: "https://img.test/dxd-new.jpg"}
+
+    async def resolve(name, url, background=False):
+        if url == HXD_BORN:
+            await asyncio.sleep(1)          # still being fetched when the fiche answers
+        return covers.get(url, "")
+    monkeypatch.setattr(gateway_module.catalog_service, "_resolve_voiranime_cover", resolve)
+
+    def variant(url, version="vostfr", source="voiranime"):
+        return {"source": source, "version": version, "url": url}
+    details = {"seasons": [
+        {"key": "saison-1", "variants": [variant("https://anime-sama.to/catalogue/x/saison1/vostfr", source="anime_sama"),
+                                         variant(HXD + "vf/", "vf"), variant(HXD)]},
+        {"key": "new", "variants": [variant(HXD_NEW)]},
+        {"key": "born", "variants": [variant(HXD_BORN)]},
+        {"key": "oav", "variants": [variant("https://anime-sama.to/catalogue/x/oav/vostfr", source="anime_sama")]},
+    ]}
+    fiche = {"seasons": [{"key": k} for k in ("saison-1", "new", "born", "oav", "film")]}
+
+    async def run():
+        return await gw._season_covers(details, fiche)
+    assert asyncio.run(run()) is True                       # BorN's cover comes with the next look
+    got = {s["key"]: s.get("cover") for s in fiche["seasons"]}
+    assert got["saison-1"].endswith("dxd.jpg") and got["new"].endswith("dxd-new.jpg")   # the VOSTFR post's cover
+    assert got["born"] is None and got["oav"] is None and got["film"] is None          # Anime-Sama: no cover of its own

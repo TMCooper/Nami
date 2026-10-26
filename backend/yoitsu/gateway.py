@@ -51,6 +51,7 @@ GROUP_LOOKUPS = 8               # VoirAnime cards of a search checked against th
 GROUP_WAIT = 4.0                # what a search waits for them (late answers still group the next search)
 GROUP_TTL = 3600
 API_EPISODES_WAIT = 8.0         # source API players behind the YoitsuWrap links of a fiche: bounded
+SEASON_COVER_WAIT = 2.5         # season covers a fiche waits for (the others come with the next look)
 SYNOPSIS_STUB = re.compile(r"^saison\s+\d+\s+de\b", re.IGNORECASE)
 AS_COVER_SLUG = re.compile(r"/Anime-Sama/IMG/(?:img/)?contenu/([A-Za-z0-9-]+)\.(?:jpe?g|png|webp)", re.IGNORECASE)
 VA_EPISODE_PATH = re.compile(r"^/anime/([^/]+)/[^/]+")   # /anime/<post slug>/<episode slug>/
@@ -945,7 +946,37 @@ class YoitsuGateway:
         if snap and (details["id"], snap.get("built_at")) not in self._learned_fiches:
             self._learned_fiches.add((details["id"], snap.get("built_at")))
             self.learn_fiche_members(details["id"], snap.get("members") or [])   # a few lookups: on the loop (it schedules the save)
-        return {**status, "version": version, "fiche": self._fiche_of(details, snap) if snap else None}
+        fiche = self._fiche_of(details, snap) if snap else None
+        pending = await self._season_covers(details, fiche) if fiche else False
+        return {**status, "version": version, "fiche": fiche, "covers_pending": pending}
+
+    async def _season_covers(self, details: dict, fiche: dict) -> bool:
+        """Each season's own cover: VoirAnime has one post per season, each with its cover (Anime-Sama shows
+        the anime's image on every season). True while some are still being fetched (they come in background).
+        """
+        if not source_health.usable("voiranime"):
+            return False
+        by_key = {s["key"]: s for s in details.get("seasons") or []}
+        tasks = {}
+        for season in fiche["seasons"]:
+            posts = [v for v in (by_key.get(season["key"]) or {}).get("variants") or []
+                     if v.get("source") == "voiranime" and v.get("url") and not season.get("is_scans")]
+            if not posts:
+                continue
+            post = min(posts, key=lambda v: v.get("version") != "vostfr")
+            entry = self.index.entry(("voiranime", slug_of(post["url"])))
+            name = entry.title if entry else legacy_title_from_url(post["url"])
+            tasks[season["key"]] = self._spawn(catalog_service._resolve_voiranime_cover(name, post["url"]))
+        if not tasks:
+            return False
+        done, pending = await asyncio.wait(list(tasks.values()), timeout=SEASON_COVER_WAIT)
+        for season in fiche["seasons"]:
+            task = tasks.get(season["key"])
+            if task in done and not task.cancelled() and task.exception() is None and task.result():
+                cover = client_cover_url(task.result())
+                if cover:
+                    season["cover"] = cover
+        return bool(pending)
 
     def learn_fiche_members(self, eid: str, urls: List[str]) -> int:
         """The VoirAnime posts YoitsuWrap built this fiche from join its card: everywhere (catalogue, search,

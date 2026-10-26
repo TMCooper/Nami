@@ -112,6 +112,7 @@ export default function AnimeDetailModal({
   // The fiche of a version: starts its build when needed; its seasons are shown once it exists
   const loadFiche = (data, v, refresh = false, keepSeasonKey = null) => {
     const request = ++ficheRequestRef.current;
+    coverLooksRef.current = 0;
     setVersion(v);
     return fetch(`/api/anime/${encodeURIComponent(data.id)}/fiche?version=${v}&refresh=${refresh}`)
       .then((res) => (res.ok ? res.json() : { state: 'failed', error: `HTTP ${res.status}`, fiche: null }))
@@ -179,10 +180,15 @@ export default function AnimeDetailModal({
       .finally(() => { if (isLatest()) setIsLoadingEpisodes(false); });
   };
 
-  // While YoitsuWrap builds the fiche, check back; the page shows it as soon as it exists
+  // While YoitsuWrap builds the fiche, check back; the page shows it as soon as it exists.
+  // Season covers still being fetched come with a later look (a few at most)
   const ficheState = fiche?.state;
+  const coverLooksRef = useRef(0);
   useEffect(() => {
-    if (!details?.id || !['queued', 'running'].includes(ficheState)) return undefined;
+    const building = ['queued', 'running'].includes(ficheState);
+    const coversComing = fiche?.covers_pending && coverLooksRef.current < 4;
+    if (!details?.id || !(building || coversComing)) return undefined;
+    if (!building) coverLooksRef.current += 1;
     let cancelled = false;
     const timer = setTimeout(() => {
       const request = ficheRequestRef.current;
@@ -195,7 +201,7 @@ export default function AnimeDetailModal({
           if (!hasEpisodes(next) || sourcesMode) return;
           if (!hadFiche) {
             selectSeason(details, firstSeasonOf(next.fiche.seasons), '', version);
-          } else if (next.state === 'ready') {
+          } else if (next.state === 'ready' && building) {
             // Rebuilt: the same season again, with the new links
             const season = next.fiche.seasons.find((s) => s.key === selectedSeasonKey) || firstSeasonOf(next.fiche.seasons);
             selectSeason(details, season, '', version, false, season.key === selectedSeasonKey);
@@ -415,7 +421,10 @@ export default function AnimeDetailModal({
 
   const animeTitle = ficheData?.title || details?.title || anime.title;
   // Real cover only: the placeholder must never be sent to the history as a cover
-  const animeCover = ficheData?.cover || details?.cover || anime.cover || '';
+  // The selected season's own cover when it has one (VoirAnime: one post, one cover per season)
+  const seasonCover = fromFiche ? selectedSeason?.cover || '' : '';
+  const animeCover = seasonCover || ficheData?.cover || details?.cover || anime.cover || '';
+  const coverFallbacks = [...new Set([ficheData?.cover, details?.cover, ...(details?.cover_fallbacks || [])].filter((c) => c && c !== animeCover))];
   const isScanMode = Boolean(selectedSeason?.is_scans) || (episodes.length > 0 && episodes[0]?.is_scan);
   const synopsis = ficheData?.synopsis || details?.synopsis;
   const allSources = ficheData?.sources?.length
@@ -495,10 +504,11 @@ export default function AnimeDetailModal({
               {/* Header Info */}
               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
                 <img
+                  key={animeCover}
                   src={animeCover || DEFAULT_ANIME_COVER}
-                  alt={animeTitle}
-                  onError={imageFallback(details?.cover_fallbacks || [], DEFAULT_ANIME_COVER)}
-                  className="detail-cover"
+                  alt={selectedSeason && seasonCover ? `${animeTitle} · ${selectedSeason.label}` : animeTitle}
+                  onError={imageFallback(coverFallbacks, DEFAULT_ANIME_COVER)}
+                  className="detail-cover cover-swap"
                   style={{
                     width: '160px',
                     height: '230px',

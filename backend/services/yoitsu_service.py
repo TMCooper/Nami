@@ -187,7 +187,7 @@ class YoitsuService:
 
         return result
 
-    async def download_chapter(self, manga_title: str, chapter_num: int, images_workers: int = 4) -> dict:
+    async def download_chapter(self, manga_title: str, chapter_num: int, images_workers: int = 4, owner: str = "") -> dict:
         """Downloads chapter images via YoitsuWrap Chapter.download_chapter, tracked in DownloadService."""
         from backend.services.download_service import download_service
 
@@ -207,7 +207,8 @@ class YoitsuService:
             season="Scans",
             episode_num=f"Chapitre {chapter_num}",
             stream_url=f"yoitsu://scan/{manga_title}/{chapter_num}",
-            stream_type="scan"
+            stream_type="scan",
+            owner=owner
         )
         task.status = "downloading"
         task.progress = 10.0
@@ -233,7 +234,7 @@ class YoitsuService:
             download_service._save_tasks()
             raise e
 
-    async def download_all_scans(self, manga_title: str, max_workers: int = 2) -> dict:
+    async def download_all_scans(self, manga_title: str, max_workers: int = 2, owner: str = "") -> dict:
         """Downloads all chapters via YoitsuWrap Scan.download_scan, tracked in DownloadService."""
         from backend.services.download_service import download_service
 
@@ -246,7 +247,8 @@ class YoitsuService:
             season="Scans",
             episode_num="Tous les chapitres",
             stream_url=f"yoitsu://scan/{manga_title}/all",
-            stream_type="scan"
+            stream_type="scan",
+            owner=owner
         )
         task.status = "downloading"
         task.progress = 10.0

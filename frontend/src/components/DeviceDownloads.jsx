@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, FolderOpen, RotateCw, Smartphone, X } from 'lucide-react';
 import {
-  canPickFolder, currentFolder, formatBytes, formatEta, formatSpeed, pickFolder, saveIntoFolder, sendToBrowser
+  canPickFile, canPickFolder, episodeTitle, formatBytes, formatEta, formatSpeed, pickFile, pickFolder, saveIntoFile,
+  saveIntoFolder, sendToBrowser
 } from '../utils/deviceDownload';
 
 const POLL_EVERY = 1000;      // ms between two looks at the episodes being prepared on the server
@@ -9,7 +10,9 @@ const PROGRESS_EVERY = 400;   // ms between two progress renders of a copy
 
 const ACTIVE = ['preparing', 'transferring', 'waiting'];
 
-const toJob = (server, mode, request) => ({
+// mode: 'file' (one episode, saved where the user chose), 'folder' (several, into the folder chosen for them)
+// or 'browser' (no file system access: the browser's own downloads)
+const toJob = (server, mode, request, destination = null) => ({
   id: server.id,
   anime: server.anime,
   season: server.season,
@@ -17,6 +20,7 @@ const toJob = (server, mode, request) => ({
   num: server.num,
   source: server.source,
   mode,
+  destination,
   request, // what to send again for a retry: { animeId, season, version }
   phase: 'preparing',
   progress: 0,
@@ -59,7 +63,8 @@ export function useDeviceDownloads() {
       const startedAt = Date.now();
       let shownAt = 0;
       try {
-        const bytes = await saveIntoFolder(currentFolder(), job, {
+        const save = job.mode === 'file' ? saveIntoFile : saveIntoFolder;
+        const bytes = await save(job.destination, job, {
           signal: controller.signal,
           onProgress: (b, total) => {
             const now = Date.now();
@@ -120,18 +125,24 @@ export function useDeviceDownloads() {
     };
   }, [preparing]);
 
-  // request: { animeId, season (fiche key), version, episodes: [nums] } — called from a click (folder picker)
+  // request: { animeId, season (fiche key), version, episodes: [nums], labels: { anime, season, version } }
+  // Called from a click: the place is asked first, at every download (the pickers need the user's gesture)
   const start = async (request) => {
     if (!request?.episodes?.length) return { ok: false };
     let mode = 'browser';
-    if (canPickFolder()) {
-      try {
-        const root = currentFolder() || await pickFolder();
-        setFolderName(root.name || 'Dossier choisi');
+    let destination = null;
+    try {
+      if (request.episodes.length === 1 && canPickFile()) {
+        destination = await pickFile(episodeTitle(request.labels || {}, request.episodes[0]));
+        mode = 'file';
+        setFolderName(destination.name);
+      } else if (canPickFolder()) {
+        destination = await pickFolder();
         mode = 'folder';
-      } catch (err) {
-        if (err?.name === 'AbortError') return { ok: false }; // picker closed: nothing starts
+        setFolderName(destination.name || 'Dossier choisi');
       }
+    } catch (err) {
+      if (err?.name === 'AbortError') return { ok: false }; // picker closed: nothing starts
     }
     const res = await fetch('/api/device-download/jobs', {
       method: 'POST',
@@ -141,7 +152,7 @@ export function useDeviceDownloads() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return { ok: false, error: data.detail || `Erreur ${res.status}` };
     const retryOf = { animeId: request.animeId, season: request.season, version: request.version };
-    setJobs((list) => [...list, ...(data.jobs || []).map((s) => toJob(s, mode, retryOf))]);
+    setJobs((list) => [...list, ...(data.jobs || []).map((s) => toJob(s, mode, retryOf, destination))]);
     return { ok: true };
   };
 
@@ -164,20 +175,11 @@ export function useDeviceDownloads() {
     const data = res ? await res.json().catch(() => ({})) : {};
     const fresh = res?.ok && data.jobs?.[0];
     setJobs((list) => list.map((j) => (j.id !== id ? j : fresh
-      ? toJob(fresh, j.mode, j.request)
+      ? toJob(fresh, j.mode, j.request, j.destination)
       : { ...j, phase: 'error', error: data.detail || 'Nouvel essai impossible' })));
   };
 
   const clear = () => setJobs((list) => list.filter((j) => ACTIVE.includes(j.phase)));
-
-  const changeFolder = async () => {
-    try {
-      const root = await pickFolder();
-      setFolderName(root.name || 'Dossier choisi');
-    } catch {
-      // picker closed: keep the current folder
-    }
-  };
 
   // Leaving the page stops the copies (and the episodes prepared for it are never fetched)
   const active = jobs.some((j) => ACTIVE.includes(j.phase));
@@ -191,7 +193,7 @@ export function useDeviceDownloads() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [active]);
 
-  return { jobs, folderName, start, cancel, retry, clear, changeFolder };
+  return { jobs, folderName, start, cancel, retry, clear };
 }
 
 const PHASE_TEXT = {
@@ -224,7 +226,7 @@ function JobProgress({ job }) {
   );
 }
 
-export default function DeviceDownloadsPanel({ jobs, folderName, cancel, retry, clear, changeFolder }) {
+export default function DeviceDownloadsPanel({ jobs, folderName, cancel, retry, clear }) {
   const [open, setOpen] = useState(true);
   if (!jobs.length) return null;
   const running = jobs.filter((j) => ACTIVE.includes(j.phase)).length;
@@ -272,13 +274,10 @@ export default function DeviceDownloadsPanel({ jobs, folderName, cancel, retry, 
             ))}
           </ul>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 12px', borderTop: '1px solid var(--border-color)', flexWrap: 'wrap' }}>
-            {folderName ? (
-              <button type="button" className="chip" onClick={changeFolder} title="Changer de dossier">
-                <FolderOpen size={14} /> {folderName}
-              </button>
-            ) : (
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', flex: 1 }}>Dossier de téléchargement du navigateur</span>
-            )}
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '5px' }}>
+              <FolderOpen size={13} />
+              {folderName ? `Dernier enregistrement : ${folderName}` : 'Dossier de téléchargement du navigateur'}
+            </span>
             <button type="button" className="chip" onClick={clear} style={{ marginLeft: 'auto' }} disabled={!jobs.some((j) => !ACTIVE.includes(j.phase))}>
               Effacer les terminés
             </button>

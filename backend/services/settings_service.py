@@ -9,7 +9,13 @@ DEFAULT_SETTINGS = {
     "default_provider": "all",  # "all", "anime_sama", "voiranime"
     "download_quality": "1080p",
     "max_concurrent_downloads": 3,
-    "disabled_sources": []      # sources switched off by the user ("anime_sama", "voiranime")
+    "disabled_sources": [],     # sources switched off by the user ("anime_sama", "voiranime")
+    # Set by the super administrator
+    "registration_open": True,  # anyone may create an account (the first one is always allowed)
+    "server_downloads": True,   # others than the administrator may download into the server's library
+    "min_free_gb": 5,           # server and device downloads stop when the disk has less free space
+    "device_max_episodes": 50,  # episodes of one « Sur cet appareil » request
+    "device_max_active": 10     # episodes one user may have being prepared at once
 }
 
 class SettingsService:

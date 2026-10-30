@@ -18,6 +18,7 @@ export default function AnimeDetailModal({
   onDownloadBulk,
   onDownloadToDevice,
   onDownloadsStarted,
+  serverDownloads = true,
   isInWatchlist = () => false,
   onToggleWatchlist
 }) {
@@ -235,25 +236,38 @@ export default function AnimeDetailModal({
     return next;
   });
 
-  const ficheDownload = (nums) => ({ animeId: details?.id, season: selectedSeasonKey, version, episodes: nums });
+  const ficheDownload = (nums) => ({
+    animeId: details?.id,
+    season: selectedSeasonKey,
+    version,
+    episodes: nums,
+    // The names the episode is saved under on the device
+    labels: { anime: fiche?.fiche?.title || details?.title || anime?.title, season: selectedSeason?.label || '', version }
+  });
 
-  // YoitsuWrap prepares the episodes on the server, the page copies them here as they are ready
+  // YoitsuWrap prepares the episodes on the server, the page copies them here as they are ready.
+  // One episode: « Enregistrer sous » (where and under which name); several: the folder to put them in
+  const downloadToDevice = async (nums) => {
+    if (!nums.length) return false;
+    const result = await onDownloadToDevice?.(ficheDownload(nums));
+    if (result?.ok) setNotice('');
+    else if (result?.error) setNotice(result.error);
+    return Boolean(result?.ok);
+  };
+
   const handleDeviceDownload = async () => {
     const nums = episodes
       .map((ep, idx) => ({ ep, key: episodeKey(ep, idx) }))
       .filter(({ key }) => selected.has(key))
       .map(({ ep }) => Number(ep.num))
       .filter((n) => Number.isFinite(n));
-    if (!nums.length) return;
-    const result = await onDownloadToDevice?.(ficheDownload(nums));
-    if (result?.ok) {
+    if (await downloadToDevice(nums)) {
       setSelecting(false);
       setSelected(new Set());
-      setNotice('');
-    } else if (result?.error) {
-      setNotice(result.error);
     }
   };
+
+  const allEpisodeNums = () => episodes.map((ep) => Number(ep.num)).filter((n) => Number.isFinite(n));
 
   // Into the server's library, by YoitsuWrap (episodes in parallel, progress in the downloads drawer)
   const downloadOnServer = async (nums) => {
@@ -752,7 +766,7 @@ export default function AnimeDetailModal({
                   </h3>
                   {episodes.length > 0 && (
                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      {isScanMode ? (
+                      {isScanMode ? (serverDownloads &&
                         <button
                           className="btn btn-secondary"
                           style={{ fontSize: '0.78rem', padding: '4px 10px' }}
@@ -808,14 +822,25 @@ export default function AnimeDetailModal({
                           >
                             <CheckCircle2 size={14} color="var(--accent-green)" /> Tout marquer vu
                           </button>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ fontSize: '0.78rem', padding: '4px 10px' }}
-                            onClick={() => (fromFiche ? downloadOnServer([]) : onDownloadBulk(historyTitle, currentSeasonName, episodes))}
-                            title={fromFiche ? 'Toute la saison sur le serveur, par YoitsuWrap (épisodes en parallèle)' : undefined}
-                          >
-                            <Download size={14} /> Tout Télécharger
-                          </button>
+                          {serverDownloads ? (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ fontSize: '0.78rem', padding: '4px 10px' }}
+                              onClick={() => (fromFiche ? downloadOnServer([]) : onDownloadBulk(historyTitle, currentSeasonName, episodes))}
+                              title={fromFiche ? 'Toute la saison sur le serveur, par YoitsuWrap (épisodes en parallèle)' : undefined}
+                            >
+                              <Download size={14} /> Tout Télécharger
+                            </button>
+                          ) : onDownloadToDevice && fromFiche && (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ fontSize: '0.78rem', padding: '4px 10px' }}
+                              onClick={() => downloadToDevice(allEpisodeNums())}
+                              title="Toute la saison sur cet appareil (le téléchargement sur le serveur est désactivé)"
+                            >
+                              <Download size={14} /> Toute la saison sur cet appareil
+                            </button>
+                          )}
                         </>
                       )}
                     </div>
@@ -903,7 +928,7 @@ export default function AnimeDetailModal({
                               >
                                 <BookOpen size={13} style={{ marginRight: '4px' }} /> Lire le Chapitre
                               </button>
-                              <button
+                              {serverDownloads && <button
                                 className={`btn btn-icon ${isDownloaded ? 'btn-success' : 'btn-secondary'}`}
                                 style={{ width: '30px', height: '30px' }}
                                 onClick={() => handleDownloadChapter(ep.num)}
@@ -915,7 +940,7 @@ export default function AnimeDetailModal({
                                 ) : (
                                   <Download size={13} />
                                 )}
-                              </button>
+                              </button>}
                             </div>
                           </div>
                         );
@@ -1012,14 +1037,28 @@ export default function AnimeDetailModal({
                               >
                                 <Check size={14} />
                               </button>
-                              <button
-                                className={`btn btn-icon ${isDownloaded ? 'btn-success' : 'btn-secondary'}`}
-                                style={{ width: '28px', height: '28px' }}
-                                onClick={() => (fromFiche ? downloadOnServer([Number(ep.num)]) : onDownloadEpisode(historyTitle, currentSeasonName, ep))}
-                                title={isDownloaded ? "Déjà téléchargé sur le disque (Re-télécharger)" : "Télécharger sur le disque"}
-                              >
-                                <Download size={12} />
-                              </button>
+                              {onDownloadToDevice && fromFiche && Number.isFinite(Number(ep.num)) && (
+                                <button
+                                  className="btn btn-icon btn-secondary"
+                                  style={{ width: '28px', height: '28px' }}
+                                  onClick={() => downloadToDevice([Number(ep.num)])}
+                                  title="Enregistrer cet épisode sur cet appareil (vous choisissez où)"
+                                  aria-label={`Enregistrer l'épisode ${epNum} sur cet appareil`}
+                                >
+                                  <Smartphone size={12} />
+                                </button>
+                              )}
+                              {serverDownloads && (
+                                <button
+                                  className={`btn btn-icon ${isDownloaded ? 'btn-success' : 'btn-secondary'}`}
+                                  style={{ width: '28px', height: '28px' }}
+                                  onClick={() => (fromFiche ? downloadOnServer([Number(ep.num)]) : onDownloadEpisode(historyTitle, currentSeasonName, ep))}
+                                  title={isDownloaded ? "Déjà téléchargé sur le serveur (Re-télécharger)" : "Télécharger sur le serveur"}
+                                  aria-label={`Télécharger l'épisode ${epNum} sur le serveur`}
+                                >
+                                  <Download size={12} />
+                                </button>
+                              )}
                             </div>}
                           </div>
                         );

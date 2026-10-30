@@ -1,12 +1,13 @@
 // Episodes saved on the viewer's own device (not in the server's library).
 // A browser cannot fetch the video hosts itself, so YoitsuWrap first downloads the episode on the server
 // (with progress), then the page fetches the finished file:
-// - Chromium on computers (Chrome, Edge, Opera) writes it into a folder the user picks:
-//   <folder>/<anime>/<season>/<version>/ep_<n>.mp4;
+// - Chromium on computers (Chrome, Edge, Opera): one episode goes where the user saves it (« Enregistrer sous »,
+//   location and name), several into the folder picked for them: <folder>/<anime>/<season>/<version>/ep_<n>.mp4;
 // - elsewhere (Firefox, Safari, phones) the browser's own download manager receives it,
 //   named "<anime> - <season> - <version> - ep_<n>.mp4".
 
 export const canPickFolder = () => typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+export const canPickFile = () => typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function';
 
 // Names valid on Windows, macOS, Android and iOS file systems
 export const safeName = (name) => (String(name || '')
@@ -17,17 +18,37 @@ export const safeName = (name) => (String(name || '')
 
 export const episodeFileName = (num) => `ep_${safeName(num)}.mp4`;
 
+// « Anime - Saison 1 - VOSTFR - ep_3.mp4 »: the name proposed when one episode is saved on its own
+export const episodeTitle = ({ anime, season, version }, num) =>
+  `${safeName(anime)} - ${safeName(season)} - ${String(version || 'vostfr').toUpperCase()} - ${episodeFileName(num)}`;
+
 export const jobFileUrl = (id) => `/api/device-download/jobs/${encodeURIComponent(id)}/file`;
 
-let folder = null; // chosen once per visit
+// Both pickers must open from a click (the browser only shows them on a user gesture); they reopen
+// where the user saved last time (same id)
+export const pickFolder = () => window.showDirectoryPicker({ id: 'nami-episodes', mode: 'readwrite', startIn: 'videos' });
 
-export const currentFolder = () => folder;
+export const pickFile = (suggestedName) => window.showSaveFilePicker({
+  id: 'nami-episode',
+  startIn: 'videos',
+  suggestedName,
+  types: [{ description: 'Vidéo MP4', accept: { 'video/mp4': ['.mp4'] } }]
+});
 
-export const pickFolder = async () => {
-  // Must run from a click: the browser only opens the picker on a user gesture
-  folder = await window.showDirectoryPicker({ id: 'nami-episodes', mode: 'readwrite', startIn: 'videos' });
-  return folder;
-};
+async function fetchPrepared(job, signal) {
+  const response = await fetch(jobFileUrl(job.id), { signal });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || `Erreur ${response.status}`);
+  }
+  return response;
+}
+
+// Copies one prepared episode where the user saved it (« Enregistrer sous »)
+export async function saveIntoFile(file, job, { signal, onProgress }) {
+  const response = await fetchPrepared(job, signal);
+  return writeInto(file, response, onProgress, () => {});
+}
 
 // Copies one prepared episode into <folder>/<anime>/<season>/<version>/ep_<n>.mp4
 export async function saveIntoFolder(root, job, { signal, onProgress }) {
@@ -36,13 +57,13 @@ export async function saveIntoFolder(root, job, { signal, onProgress }) {
     dir = await dir.getDirectoryHandle(safeName(part), { create: true });
   }
   const fileName = episodeFileName(job.num);
-  const response = await fetch(jobFileUrl(job.id), { signal });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.detail || `Erreur ${response.status}`);
-  }
-  const total = Number(response.headers.get('content-length')) || 0;
+  const response = await fetchPrepared(job, signal);
   const file = await dir.getFileHandle(fileName, { create: true });
+  return writeInto(file, response, onProgress, () => dir.removeEntry(fileName));
+}
+
+async function writeInto(file, response, onProgress, removeFile) {
+  const total = Number(response.headers.get('content-length')) || 0;
   const writable = await file.createWritable();
   const reader = response.body.getReader();
   let bytes = 0;
@@ -58,7 +79,7 @@ export async function saveIntoFolder(root, job, { signal, onProgress }) {
   } catch (err) {
     // A cancelled or broken copy leaves no half file behind
     await writable.abort().catch(() => {});
-    await dir.removeEntry(fileName).catch(() => {});
+    await Promise.resolve().then(removeFile).catch(() => {});
     throw err;
   }
   return bytes;

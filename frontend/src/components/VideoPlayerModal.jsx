@@ -842,9 +842,11 @@ export default function VideoPlayerModal({
             </button>
           )}
 
-          <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => onDownloadEpisode(animeTitle, season, episode)} aria-label="Télécharger">
-            <Download size={14} /> <span className="btn-label">Télécharger</span>
-          </button>
+          {onDownloadEpisode && (
+            <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '5px 10px' }} onClick={() => onDownloadEpisode(animeTitle, season, episode)} aria-label="Télécharger sur le serveur">
+              <Download size={14} /> <span className="btn-label">Télécharger</span>
+            </button>
+          )}
 
           <button
             className="btn btn-icon btn-secondary"

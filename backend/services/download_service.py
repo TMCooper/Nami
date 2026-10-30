@@ -47,8 +47,9 @@ def _needs_resolution(url: str) -> bool:
 
 class DownloadTask:
     def __init__(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8", custom_filename: str = None,
-                 fallback_urls: Optional[List[str]] = None):
+                 fallback_urls: Optional[List[str]] = None, owner: str = ""):
         self.id = str(uuid.uuid4())
+        self.owner = owner   # the account that asked for it
         self.anime_title = anime_title
         self.season = season or "Saison_1"
         self.episode_num = str(episode_num)
@@ -86,6 +87,7 @@ class DownloadTask:
             "error_message": self.error_message,
             "file_path": self.file_path,
             "mode": self.mode,
+            "owner": self.owner,
             "version": self.version,
             "source": self.source,
             "downloaded_bytes": self.downloaded_bytes,
@@ -148,6 +150,7 @@ class DownloadService:
                             fallback_urls=item.get("fallback_urls")
                         )
                         t.id = item["id"]
+                        t.owner = item.get("owner", "")
                         t.mode = item.get("mode", "legacy")
                         t.version = item.get("version", "")
                         t.source = item.get("source", "")
@@ -177,14 +180,15 @@ class DownloadService:
             print(f"[DownloadService] Error saving tasks DB: {e}")
 
     def add_task(self, anime_title: str, season: str, episode_num: str, stream_url: str, stream_type: str = "m3u8",
-                 fallback_urls: Optional[List[str]] = None) -> DownloadTask:
+                 fallback_urls: Optional[List[str]] = None, owner: str = "") -> DownloadTask:
         task = DownloadTask(
             anime_title=anime_title,
             season=season,
             episode_num=episode_num,
             stream_url=stream_url,
             stream_type=stream_type,
-            fallback_urls=fallback_urls
+            fallback_urls=fallback_urls,
+            owner=owner
         )
         self.tasks[task.id] = task
         self._save_tasks()
@@ -206,13 +210,15 @@ class DownloadService:
             return True
         return False
 
-    def clear_completed(self):
-        self.tasks = {k: v for k, v in self.tasks.items() if v.status not in ["completed", "cancelled", "error"]}
+    def clear_completed(self, owner: Optional[str] = None):
+        """Finished downloads leave the list: everyone's, or only those of one account."""
+        self.tasks = {k: v for k, v in self.tasks.items()
+                      if v.status not in ["completed", "cancelled", "error"] or (owner is not None and v.owner != owner)}
         self._save_tasks()
 
     # --- YoitsuWrap downloads ---
     def add_wrapper_season(self, anime_title: str, season_label: str, version: str, episodes: List[dict],
-                           cover: str = "") -> List[DownloadTask]:
+                           cover: str = "", owner: str = "") -> List[DownloadTask]:
         """Episodes of one season of a fiche, downloaded by YoitsuWrap (Season.download_season) in parallel.
 
         episodes: [{num, link, source}] (links verified by YoitsuWrap). Files land where YoitsuWrap puts
@@ -225,7 +231,7 @@ class DownloadService:
         tasks, items = [], []
         for ep in episodes:
             task = DownloadTask(anime_title=anime_title, season=season_name, episode_num=str(ep["num"]),
-                                stream_url=ep["link"], stream_type="wrapper")
+                                stream_url=ep["link"], stream_type="wrapper", owner=owner)
             task.mode, task.version, task.source = "wrapper", version, ep.get("source") or ""
             item = wrapper_download.Item(title=folder, season=season_folder, version=version, num=int(ep["num"]),
                                          link=ep["link"], source=(ep.get("source") or "").upper(), root=root)

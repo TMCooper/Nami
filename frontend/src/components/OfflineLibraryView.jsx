@@ -17,7 +17,8 @@ import {
 } from 'lucide-react';
 import MangaReaderModal from './MangaReaderModal';
 
-export default function OfflineLibraryView({ onPlayEpisode }) {
+// Files on the server: only the super administrator deletes them (the server refuses the others)
+export default function OfflineLibraryView({ onPlayEpisode, canDelete = false }) {
   const [library, setLibrary] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedAnimeTitle, setSelectedAnimeTitle] = useState(null);
@@ -312,13 +313,13 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                 </button>
               )}
 
-              <button
+              {canDelete && (<button
                 className="btn btn-secondary"
                 onClick={() => setDeleteConfirm({ type: 'anime', animeTitle: currentAnime.anime_title })}
                 style={{ padding: '8px 16px', fontSize: '0.85rem', color: '#f85149', borderColor: 'rgba(248, 81, 73, 0.3)' }}
               >
                 <Trash2 size={15} /> Supprimer du disque
-              </button>
+              </button>)}
             </div>
           </div>
         </div>
@@ -373,7 +374,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {selectedCount > 0 && (
+            {canDelete && selectedCount > 0 && (
               <button
                 className="btn btn-primary"
                 style={{ fontSize: '0.8rem', padding: '5px 12px', background: '#f85149', borderColor: '#f85149' }}
@@ -557,7 +558,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       </span>
                     </div>
 
-                    <button
+                    {canDelete && (<button
                       className="btn btn-icon btn-secondary"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -571,7 +572,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       title="Supprimer ce chapitre"
                     >
                       <Trash2 size={13} />
-                    </button>
+                    </button>)}
                   </div>
                 </div>
               );
@@ -760,7 +761,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       </span>
                     </div>
 
-                    <button
+                    {canDelete && (<button
                       className="btn btn-icon btn-secondary"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -774,7 +775,7 @@ export default function OfflineLibraryView({ onPlayEpisode }) {
                       title="Supprimer cet épisode"
                     >
                       <Trash2 size={13} />
-                    </button>
+                    </button>)}
                   </div>
                 </div>
               );

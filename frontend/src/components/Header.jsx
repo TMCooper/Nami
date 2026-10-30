@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Download, Settings, RefreshCw, Home, History, BarChart3, HardDrive, Bookmark, X } from 'lucide-react';
+import { Search, Download, Settings, RefreshCw, Home, History, BarChart3, HardDrive, Bookmark, X, ShieldCheck } from 'lucide-react';
 
 export default function Header({
   searchQuery,
@@ -11,11 +11,13 @@ export default function Header({
   watchlistCount,
   onOpenDownloads,
   onOpenSettings,
+  onOpenAdmin,
   onOpenStats,
   currentUser,
   onOpenAuth,
   onApisReady
 }) {
+  const isAdmin = currentUser?.role === 'admin';
   const [catalogStatus, setCatalogStatus] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const apisReadyRef = useRef(null);
@@ -154,16 +156,18 @@ export default function Header({
 
         {/* Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={handleRefreshCatalog}
-            disabled={isRefreshing}
-            aria-label={refreshLabel}
-            title={refreshLabel}
-          >
-            <RefreshCw size={19} className={isRefreshing ? 'animate-spin' : ''} />
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={handleRefreshCatalog}
+              disabled={isRefreshing}
+              aria-label={refreshLabel}
+              title={refreshLabel}
+            >
+              <RefreshCw size={19} className={isRefreshing ? 'animate-spin' : ''} />
+            </button>
+          )}
 
           <button type="button" className="icon-btn" onClick={onOpenDownloads} aria-label="Téléchargements" title="Téléchargements">
             <Download size={19} />
@@ -174,17 +178,25 @@ export default function Header({
             <BarChart3 size={19} />
           </button>
 
-          <button type="button" className="icon-btn" onClick={onOpenSettings} aria-label="Paramètres" title="Paramètres">
-            <Settings size={19} />
-          </button>
+          {/* The server is the super administrator's: its settings and the accounts */}
+          {isAdmin && (
+            <>
+              <button type="button" className="icon-btn" onClick={onOpenAdmin} aria-label="Administration" title="Administration (comptes, sécurité, téléchargements)">
+                <ShieldCheck size={19} />
+              </button>
+              <button type="button" className="icon-btn" onClick={onOpenSettings} aria-label="Paramètres du serveur" title="Paramètres du serveur">
+                <Settings size={19} />
+              </button>
+            </>
+          )}
 
           {/* Profile */}
           <button
             type="button"
             className="icon-btn"
             onClick={onOpenAuth}
-            aria-label={currentUser?.username ? `Profil ${currentUser.username} : changer de profil` : 'Se connecter'}
-            title={currentUser?.username ? `${currentUser.username} — changer de profil` : 'Se connecter'}
+            aria-label={`Mon compte (${currentUser?.username || ''})`}
+            title={`${currentUser?.username || ''} — mon compte`}
             style={{ marginLeft: '4px' }}
           >
             {currentUser?.avatar && currentUser.avatar.startsWith('data:') ? (

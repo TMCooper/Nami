@@ -19,10 +19,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from backend.security import ensure_free_space, is_admin, require_server_downloads, session_user_id
 from backend.services import wrapper_download
 from backend.services.download_service import download_service
 from backend.services.settings_service import settings_service
@@ -70,10 +71,10 @@ def _workers() -> int:
 
 
 @router.post("/downloads/fiche")
-async def add_fiche_download(payload: FicheDownload):
+async def add_fiche_download(payload: FicheDownload, user_id: str = Depends(require_server_downloads)):
     found = await fiche_download_items(payload)
     tasks = download_service.add_wrapper_season(found["title"], found["label"], payload.version,
-                                                found["episodes"], cover=found["cover"])
+                                                found["episodes"], cover=found["cover"], owner=user_id)
     return {"total_added": len(tasks), "tasks": [t.to_dict() for t in tasks]}
 
 
@@ -86,7 +87,12 @@ class DeviceJobs:
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=DEVICE_BATCHES, thread_name_prefix="yoitsu-device")
 
-    def start(self, found: dict, version: str, workers: int) -> List[dict]:
+    def active(self, owner: str) -> int:
+        """Episodes this account has being prepared."""
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j["owner"] == owner and j["item"].status in ("queued", "downloading"))
+
+    def start(self, found: dict, version: str, workers: int, owner: str = "") -> List[dict]:
         self.purge()
         root = os.path.join(self.folder, uuid.uuid4().hex)
         title, label = found["title"], found["label"]
@@ -96,7 +102,7 @@ class DeviceJobs:
                                          version=version, num=int(ep["num"]), link=ep["link"],
                                          source=(ep.get("source") or "").upper(), root=root)
             job_id = uuid.uuid4().hex
-            job = {"id": job_id, "item": item, "root": root, "created": time.time(), "anime": title,
+            job = {"id": job_id, "owner": owner, "item": item, "root": root, "created": time.time(), "anime": title,
                    "season": label, "version": version, "num": int(ep["num"]), "source": ep.get("source") or ""}
             with self._lock:
                 self._jobs[job_id] = job
@@ -115,17 +121,23 @@ class DeviceJobs:
             "error": item.error,
         }
 
-    def get(self, job_id: str):
+    def get(self, job_id: str, owner: str = None):
+        """The job, when it belongs to owner (None: any owner)."""
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+        return job if job and (owner is None or job["owner"] == owner) else None
 
-    def statuses(self, ids: List[str]) -> List[dict]:
-        return [self.describe(job) for job in (self.get(i) for i in ids) if job]
+    def statuses(self, ids: List[str], owner: str = None) -> List[dict]:
+        return [self.describe(job) for job in (self.get(i, owner) for i in ids) if job]
 
-    def remove(self, job_id: str) -> bool:
+    def remove(self, job_id: str, owner: str = None) -> bool:
         """Cancels the download, or deletes the file once the page has it."""
         with self._lock:
-            job = self._jobs.pop(job_id, None)
+            job = self._jobs.get(job_id)
+            if job and (owner is None or job["owner"] == owner):
+                self._jobs.pop(job_id)
+            else:
+                job = None
         if not job:
             return False
         item = job["item"]
@@ -152,7 +164,7 @@ class DeviceJobs:
             old = [i for i, j in self._jobs.items() if j["item"].status not in ("queued", "downloading")
                    and (j["created"] < limit or j.get("sent_at", now) < now - SENT_KEEP)]
         for job_id in old:
-            self.remove(job_id)
+            self.remove(job_id)   # no owner: the purge removes anyone's
         with self._lock:
             live = {j["root"] for j in self._jobs.values()}
         try:
@@ -173,20 +185,39 @@ def _content_disposition(name: str) -> str:
     return f"attachment; filename=\"{ascii_name}.mp4\"; filename*=UTF-8''{quote(name + '.mp4')}"
 
 
+def _owner_filter(request: Request, user_id: str):
+    """The administrator may follow anyone's jobs; the others only their own."""
+    return None if is_admin(request) else user_id
+
+
 @router.post("/device-download/jobs")
-async def start_device_download(payload: FicheDownload):
+async def start_device_download(payload: FicheDownload, request: Request, user_id: str = Depends(session_user_id)):
+    settings = settings_service.get_settings()
+    limit = int(settings.get("device_max_episodes") or 50)
+    if len(payload.episodes) > limit:
+        raise HTTPException(status_code=413, detail=f"Au plus {limit} épisodes par demande.")
+    ensure_free_space(DEVICE_DIR)   # the episodes go through the server's disk first
     found = await fiche_download_items(payload)
-    return {"jobs": device_jobs.start(found, payload.version, _workers())}
+    if len(found["episodes"]) > limit:
+        raise HTTPException(status_code=413, detail=f"Au plus {limit} épisodes par demande : choisissez-en moins.")
+    active_limit = int(settings.get("device_max_active") or 10)
+    active = device_jobs.active(user_id)
+    if not is_admin(request) and active + len(found["episodes"]) > active_limit:
+        raise HTTPException(status_code=429, detail=(
+            f"Vous avez déjà {active} épisode(s) en préparation (au plus {active_limit} à la fois) : "
+            "attendez qu'ils soient copiés."))
+    return {"jobs": device_jobs.start(found, payload.version, _workers(), owner=user_id)}
 
 
 @router.get("/device-download/jobs")
-async def device_download_status(job_id: List[str] = Query(..., alias="id", max_length=200)):
-    return {"jobs": device_jobs.statuses(job_id)}
+async def device_download_status(request: Request, job_id: List[str] = Query(..., alias="id", max_length=200),
+                                 user_id: str = Depends(session_user_id)):
+    return {"jobs": device_jobs.statuses(job_id, _owner_filter(request, user_id))}
 
 
 @router.get("/device-download/jobs/{job_id}/file")
-async def device_download_file(job_id: str):
-    job = device_jobs.get(job_id)
+async def device_download_file(job_id: str, request: Request, user_id: str = Depends(session_user_id)):
+    job = device_jobs.get(job_id, _owner_filter(request, user_id))
     if not job:
         raise HTTPException(status_code=404, detail="Téléchargement introuvable.")
     item = job["item"]
@@ -200,7 +231,7 @@ async def device_download_file(job_id: str):
 
 
 @router.delete("/device-download/jobs/{job_id}")
-async def remove_device_download(job_id: str):
-    if not device_jobs.remove(job_id):
+async def remove_device_download(job_id: str, request: Request, user_id: str = Depends(session_user_id)):
+    if not device_jobs.remove(job_id, _owner_filter(request, user_id)):
         raise HTTPException(status_code=404, detail="Téléchargement introuvable.")
     return {"status": "removed"}

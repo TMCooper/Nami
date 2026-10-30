@@ -128,6 +128,17 @@ Nami/
 
 ---
 
+## 🔐 Comptes & Sécurité
+
+- **Connexion par pseudo et mot de passe** (aucune liste de profils affichée). « Se souvenir de moi » garde la session 30 jours ; sinon elle se ferme après 12 h d'inactivité. Les mots de passe sont hachés (PBKDF2-SHA256) ; les anciens sont convertis à la connexion suivante.
+- **Super administrateur** : le premier compte créé. Il ouvre ou ferme la création de compte, crée, renomme, désactive, supprime les comptes et réinitialise leurs mots de passe, et peut transférer son rôle. Seul lui accède aux réglages du serveur, aux mises à jour, aux sources et à la suppression des fichiers téléchargés (icône 🛡️ **Administration**).
+- **Installation qui avait déjà des comptes** : aucun n'est administrateur. Un code d'installation est écrit dans `data/admin-setup.txt` (et dans les journaux) ; connectez-vous puis saisissez-le dans **Mon compte** pour devenir super administrateur.
+- **Force brute** : après 5 échecs en 15 min, l'adresse IP et le compte sont bloqués 1 min, puis 2, 4… jusqu'à 1 h. Les blocages, les sessions ouvertes et le journal de sécurité sont visibles (et levables) dans l'administration.
+- **Téléchargements** : l'administrateur peut réserver le téléchargement sur le serveur à lui seul (les autres enregistrent les épisodes sur leur appareil), garder un espace disque libre minimum, et limiter les épisodes demandés « Sur cet appareil ».
+- Derrière un reverse proxy, définissez `NAMI_TRUST_PROXY=1` pour que l'adresse réelle des visiteurs (`X-Forwarded-For`) soit utilisée par la protection anti force brute.
+
+---
+
 ## 🔄 Mises à Jour & Maintenance
 
 ### 1. Directement depuis l'application Web (Recommandé)

@@ -6,7 +6,9 @@ import DownloadManagerDrawer from './components/DownloadManagerDrawer';
 import SettingsModal from './components/SettingsModal';
 import DeviceDownloadsPanel, { useDeviceDownloads } from './components/DeviceDownloads';
 import StatsModal from './components/StatsModal';
-import AuthModal from './components/AuthModal';
+import AccountModal from './components/AccountModal';
+import AdminModal from './components/AdminModal';
+import LoginScreen from './components/LoginScreen';
 import { normalizeTitle } from './utils/titles';
 import { animeKeys, sameAnime, watchlistPayload } from './utils/animes';
 
@@ -27,7 +29,7 @@ const TabFallback = () => (
 
 const RESTORE_WINDOW_MS = 60000; // a re-add this soon after a removal is an undo: the anime keeps its place
 
-export default function App() {
+function NamiApp({ currentUser, setupNeeded, onUserChange, onSignOut }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('catalog'); // 'catalog' | 'history' | 'watchlist' | 'offline'
   const [results, setResults] = useState([]);
@@ -54,16 +56,11 @@ export default function App() {
   const resumeTokenRef = useRef(0); // bumped by every newer action: a slow resume then gives up
   const noticeTimerRef = useRef(null);
 
-  // User Authentication State
-  const [currentUser, setCurrentUser] = useState(() => {
-    try {
-      const saved = localStorage.getItem('nami_active_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
-  });
+  // « Mon compte » and, for the super administrator, the administration
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  // What the administrator allows this account (server downloads or this device only)
+  const [policy, setPolicy] = useState({ server_downloads: true });
 
   // Modals & Drawers
   const [selectedAnime, setSelectedAnime] = useState(null);
@@ -80,17 +77,10 @@ export default function App() {
   const userIdRef = useRef(userId);
   userIdRef.current = userId;
 
-  // Save active user to localStorage when changed
-  const handleSelectUser = (user) => {
-    setCurrentUser(user);
-    try {
-      if (user) {
-        localStorage.setItem('nami_active_user', JSON.stringify(user));
-      } else {
-        localStorage.removeItem('nami_active_user');
-      }
-    } catch {}
-  };
+  const loadPolicy = useCallback(() => {
+    fetch('/api/policy').then((res) => (res.ok ? res.json() : null)).then((data) => data && setPolicy(data)).catch(() => {});
+  }, []);
+  useEffect(() => { loadPolicy(); }, [loadPolicy, currentUser?.role]);
 
   // The anime page and the player are fetched once the home screen is idle: the first tap opens them at once
   useEffect(() => {
@@ -108,24 +98,6 @@ export default function App() {
     load();
     const timer = setInterval(load, 120000);
     return () => clearInterval(timer);
-  }, []);
-
-  // Check if users exist on startup, force AuthModal if zero users or not logged in
-  useEffect(() => {
-    fetch('/api/users')
-      .then((res) => res.json())
-      .then((data) => {
-        const uList = data || [];
-        if (uList.length === 0) {
-          setCurrentUser(null);
-          try { localStorage.removeItem('nami_active_user'); } catch {}
-          setIsAuthOpen(true);
-        } else if (!currentUser || !uList.some((u) => u.id === currentUser.id)) {
-          setCurrentUser(null);
-          setIsAuthOpen(true);
-        }
-      })
-      .catch(() => {});
   }, []);
 
   const showNotice = (text) => {
@@ -528,6 +500,7 @@ export default function App() {
         watchlistCount={watchlist.length}
         onOpenDownloads={() => setIsDownloadsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenAdmin={() => setIsAdminOpen(true)}
         onOpenStats={() => setIsStatsOpen(true)}
         currentUser={currentUser}
         onOpenAuth={() => setIsAuthOpen(true)}
@@ -541,7 +514,9 @@ export default function App() {
             <span style={{ flex: 1, minWidth: '200px' }}>
               <strong>{s.label}</strong> : {s.message || 'source indisponible'}. Ses animes sont ignorés pour l'instant.
             </span>
-            <button className="chip" onClick={() => setIsSettingsOpen(true)}>Paramètres des sources</button>
+            {currentUser?.role === 'admin' && (
+              <button className="chip" onClick={() => setIsSettingsOpen(true)}>Paramètres des sources</button>
+            )}
           </div>
         ))}
         <Suspense fallback={<TabFallback />}>
@@ -585,6 +560,7 @@ export default function App() {
           />
         ) : (
           <OfflineLibraryView
+            canDelete={currentUser?.role === 'admin'}
             onPlayEpisode={(title, season, ep, eps, cover, time, filePath, context) =>
               handlePlayEpisode(title, season, ep, eps, cover, time, filePath, context)
             }
@@ -603,9 +579,10 @@ export default function App() {
             handlePlayEpisode(animeTitle, season, ep, eps, cover, time, filePath, context);
             loadUserShelves();
           }}
-          onDownloadEpisode={handleDownloadEpisode}
+          onDownloadEpisode={policy.server_downloads !== false ? handleDownloadEpisode : null}
           onDownloadBulk={handleDownloadBulk}
           onDownloadToDevice={device.start}
+          serverDownloads={policy.server_downloads !== false}
           onDownloadsStarted={() => setIsDownloadsOpen(true)}
           isInWatchlist={isInWatchlist}
           onToggleWatchlist={handleToggleWatchlist}
@@ -634,7 +611,7 @@ export default function App() {
             // Once the player's last save is stored: the shelf then shows the final position
             Promise.resolve(lastSave).catch(() => {}).finally(loadUserShelves);
           }}
-          onDownloadEpisode={handleDownloadEpisode}
+          onDownloadEpisode={policy.server_downloads !== false ? handleDownloadEpisode : null}
           onSelectNextEpisode={(nextEp) => {
             // The context is kept: same anime, same season variant
             setActivePlayer((prev) => ({
@@ -672,12 +649,24 @@ export default function App() {
         currentUser={currentUser}
       />
 
-      <AuthModal
+      <AccountModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
         currentUser={currentUser}
-        onSelectUser={handleSelectUser}
+        setupNeeded={setupNeeded}
+        onUserChange={onUserChange}
+        onSignOut={onSignOut}
+        onBecameAdmin={loadPolicy}
       />
+
+      {currentUser?.role === 'admin' && (
+        <AdminModal
+          isOpen={isAdminOpen}
+          onClose={() => { setIsAdminOpen(false); loadPolicy(); }}
+          currentUser={currentUser}
+          onAdminLost={() => { setIsAdminOpen(false); fetch('/api/auth/me').then((r) => r.json()).then(onUserChange).catch(() => {}); }}
+        />
+      )}
 
       {/* Above the detail modal (50), below the player (9999) */}
       {notice && (
@@ -703,5 +692,57 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+
+// The session decides: the sign-in screen until there is one, then Nami. A request answered 401 means the
+// session ended (signed out elsewhere, account disabled): back to the sign-in screen.
+export default function App() {
+  const [auth, setAuth] = useState(null);
+
+  const loadStatus = useCallback((extra = {}) => fetch('/api/auth/status')
+    .then((res) => res.json())
+    .then((data) => setAuth({ ...data, ...extra }))
+    .catch(() => setAuth({ user: null, has_users: true, registration_open: false, unreachable: true })), []);
+
+  useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  useEffect(() => {
+    const original = window.fetch;
+    window.fetch = async (...args) => {
+      const res = await original(...args);
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+      if (res.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+        setAuth((current) => (current?.user ? { ...current, user: null, expired: true } : current));
+      }
+      return res;
+    };
+    return () => { window.fetch = original; };
+  }, []);
+
+  const signOut = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    loadStatus();
+  };
+
+  if (!auth) {
+    return (
+      <div className="login-page">
+        <Loader2 className="animate-spin" size={28} color="var(--yt-red)" />
+      </div>
+    );
+  }
+  if (!auth.user) {
+    return <LoginScreen key={auth.expired ? 'expired' : 'signed-out'} status={auth} onSignedIn={() => loadStatus()} />;
+  }
+  return (
+    <NamiApp
+      key={auth.user.id}
+      currentUser={auth.user}
+      setupNeeded={auth.setup_needed}
+      onUserChange={(user) => user && setAuth((current) => ({ ...current, user, setup_needed: current.setup_needed && user.role !== 'admin' }))}
+      onSignOut={signOut}
+    />
   );
 }

@@ -55,8 +55,9 @@ def stores(monkeypatch, tmp_path):
     monkeypatch.setattr(history_service, "_dirty", False)
     monkeypatch.setattr(watchlist_service, "items", {})
     # The watchlist only keeps buckets of known profiles (in memory only: users.json is never saved here)
-    monkeypatch.setitem(user_service.users, "u1", {"id": "u1", "username": "Zzz U1", "avatar": "x", "password_hash": "",
-                                                   "created_at": 0})
+    for uid in ("u1", "u2", "u3", "u4", "u5", "u6"):
+        monkeypatch.setitem(user_service.users, uid, {"id": uid, "username": f"Zzz {uid.upper()}", "avatar": "x",
+                                                      "password_hash": "", "created_at": 0})
     # TestClient serves each request in a short-lived loop: write at once instead of debouncing
     monkeypatch.setattr(history_service, "_schedule_flush", lambda delay=None: history_service.flush())
     gw = gateway_module.yoitsu_gateway
@@ -119,8 +120,9 @@ def _progress(uid, season="Saison 1", **extra):
 
 
 def test_progress_accepts_null_duration_and_position(stores):
-    resp = client.post("/api/history/progress", json={"user_id": "u1", "anime_title": "Zzz Test Show", "season": "Saison 1",
-                                                       "ep_id": "1", "position_sec": None, "duration_sec": None})
+    resp = client.post("/api/history/progress", json={"anime_title": "Zzz Test Show", "season": "Saison 1",
+                                                       "ep_id": "1", "position_sec": None, "duration_sec": None},
+                       headers={"X-User-ID": "u1"})
     assert resp.status_code == 200
     assert (resp.json()["position_sec"], resp.json()["duration_sec"]) == (0, 0)
     assert "u1" in json.loads((stores / "history.json").read_text(encoding="utf-8"))
@@ -334,7 +336,7 @@ def test_watchlist_routes(stores, monkeypatch):
         resp = client.post("/api/watchlist", json={"anime": bad}, headers={"X-User-ID": "u1"})
         assert resp.status_code == 400 and resp.json() == {"detail": "Anime invalide."}
 
-    resp = client.post("/api/watchlist", json={"user_id": "u1", "anime": anime})
+    resp = client.post("/api/watchlist", json={"anime": anime}, headers={"X-User-ID": "u1"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 1 and data["results"][0]["id"] == "a-zzz-test-show"
@@ -347,25 +349,25 @@ def test_watchlist_routes(stores, monkeypatch):
     assert client.get("/api/watchlist").json() == {"total": 0, "results": []}
     assert client.post("/api/watchlist", json={"anime": {**anime, "id": "a-zzz-test-show"}}).json()["total"] == 1
     assert len(lookups) == 1
-    assert client.get("/api/watchlist").json()["total"] == 1   # the 'default' bucket
+    assert client.get("/api/watchlist").json()["total"] == 1   # the signed-in administrator's
 
     assert client.delete("/api/watchlist", headers={"X-User-ID": "u1"}).status_code == 400
     resp = client.delete("/api/watchlist", params={"source": "anime_sama", "url": SHOW_URL}, headers={"X-User-ID": "u1"})
     assert resp.status_code == 200 and resp.json() == {"total": 0, "results": []}
     assert client.get("/api/watchlist").json()["total"] == 1
     assert client.delete("/api/watchlist", params={"id": "a-zzz-test-show"}).json()["total"] == 0
-    assert json.loads((stores / "watchlist.json").read_text(encoding="utf-8")) == {"u1": [], "default": []}
+    assert json.loads((stores / "watchlist.json").read_text(encoding="utf-8")) == {"u1": [], "test_admin": []}
 
 
-def test_watchlist_only_writes_buckets_of_known_profiles(stores):
-    for kwargs in ({"headers": {"X-User-ID": "user_zzz_unknown"}}, {"json_user": "user_zzz_unknown"}):
-        body = {"anime": SHOW, **({"user_id": kwargs["json_user"]} if "json_user" in kwargs else {})}
-        resp = client.post("/api/watchlist", json=body, headers=kwargs.get("headers"))
-        assert resp.status_code == 404 and resp.json() == {"detail": "Profil introuvable."}
+def test_watchlist_only_writes_buckets_of_signed_in_accounts(stores):
+    # An unknown account has no session: nothing is written
+    resp = client.post("/api/watchlist", json={"anime": SHOW}, headers={"X-User-ID": "user_zzz_unknown"})
+    assert resp.status_code == 401
     assert watchlist_service.items == {} and not (stores / "watchlist.json").exists()
-    assert client.post("/api/watchlist", json={"anime": SHOW}).status_code == 200   # 'default'
-    assert client.post("/api/watchlist", json={"anime": SHOW}, headers={"X-User-ID": "u1"}).status_code == 200
-    assert set(watchlist_service.items) == {"default", "u1"}
+    # A body naming another account is ignored: the item goes to the signed-in one
+    assert client.post("/api/watchlist", json={"anime": SHOW, "user_id": "u2"}, headers={"X-User-ID": "u1"}).status_code == 200
+    assert client.post("/api/watchlist", json={"anime": SHOW}).status_code == 200   # the test administrator
+    assert set(watchlist_service.items) == {"test_admin", "u1"}
 
 
 def test_malformed_urls_never_make_a_route_fail(stores):
@@ -401,22 +403,22 @@ def test_delete_user_purges_history_watchlist_and_recents(stores, monkeypatch):
     monkeypatch.setattr(user_module, "USERS_FILE", str(stores / "users.json"))
     monkeypatch.setattr(cache_module, "RECENT_FILE", str(stores / "recent.json"))
     uid = "user_0000test"
-    monkeypatch.setattr(user_service, "users", {uid: {"id": uid, "username": "Zzz", "avatar": "x", "password_hash": "",
-                                                      "created_at": 0}})
+    monkeypatch.setitem(user_service.users, uid, {"id": uid, "username": "Zzz", "avatar": "x", "password_hash": "",
+                                                  "created_at": 0})
     recent = {"title": "Zzz Test Show", "url": SHOW_URL, "source": "anime_sama", "cover": "", "viewed_at": 1.0}
     monkeypatch.setattr(cache_service, "recent_data", {uid: [recent], "default": [recent]})
     for owner in (uid, "default"):
         history_service.save_progress(owner, "Zzz Test Show", "Saison 1", "1", 300, 1400)
         watchlist_service.add(owner, SHOW)
 
-    resp = client.delete(f"/api/users/{uid}")
+    resp = client.delete(f"/api/admin/users/{uid}")
     assert resp.status_code == 200
     assert uid not in history_service.history and uid not in watchlist_service.items and uid not in cache_service.recent_data
     for name in ("history.json", "watchlist.json", "recent.json"):
         stored = json.loads((stores / name).read_text(encoding="utf-8"))
         assert uid not in stored and "default" in stored
     assert uid not in json.loads((stores / "users.json").read_text(encoding="utf-8"))
-    assert client.delete(f"/api/users/{uid}").status_code == 404
+    assert client.delete(f"/api/admin/users/{uid}").status_code == 404
 
 
 def test_nothing_is_written_outside_tmp(stores):

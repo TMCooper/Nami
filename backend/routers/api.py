@@ -9,7 +9,7 @@ import mimetypes
 import hashlib
 import subprocess
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Header, Request, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, Response, FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -26,6 +26,7 @@ from backend.services.source_health import source_health
 from backend.services.yoitsu_service import yoitsu_service
 from backend.yoitsu.gateway import yoitsu_gateway
 from backend.services.net_safety import resolve_media_path, media_root
+from backend.security import is_admin, require_admin, require_server_downloads, session_user_id
 
 SCANS_TIMEOUT = 120.0
 
@@ -39,15 +40,6 @@ def _media_path_or_404(file_path: str, kind: str = "Fichier") -> str:
     return real_path
 
 router = APIRouter(prefix="/api", tags=["Nami API"])
-
-class UserRegister(BaseModel):
-    username: str
-    password: Optional[str] = ""
-    avatar: Optional[str] = "👤"
-
-class UserLogin(BaseModel):
-    username: str
-    password: Optional[str] = ""
 
 class SettingsUpdate(BaseModel):
     root_folder: Optional[str] = None
@@ -186,85 +178,6 @@ def _spawn_legacy_linking(uid: str, pending: list):
     _link_tasks.add(task)
     task.add_done_callback(_link_tasks.discard)
 
-# --- User Auth & Accounts Routes ---
-@router.get("/users")
-async def list_users():
-    return user_service.list_users()
-
-@router.post("/auth/register")
-async def register(payload: UserRegister):
-    try:
-        user = user_service.register_user(
-            username=payload.username,
-            password=payload.password or "",
-            avatar=payload.avatar or "👤"
-        )
-        return user
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.post("/auth/login")
-async def login(payload: UserLogin):
-    try:
-        user = user_service.login_user(
-            username=payload.username,
-            password=payload.password or ""
-        )
-        return user
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
-
-@router.get("/auth/me")
-async def get_current_user(x_user_id: Optional[str] = Header("default")):
-    user = user_service.get_user(x_user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
-    return user
-
-@router.post("/auth/avatar")
-async def upload_avatar(x_user_id: Optional[str] = Header("default"), file: UploadFile = File(...)):
-    """Upload a custom profile picture. Stored as base64 data URI in user data."""
-    uid = x_user_id or "default"
-    if uid not in user_service.users:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
-
-    content = await file.read()
-    if len(content) > 2 * 1024 * 1024:  # 2MB max
-        raise HTTPException(status_code=400, detail="L'image ne doit pas dépasser 2 Mo.")
-
-    mime = file.content_type or "image/png"
-    b64 = base64.b64encode(content).decode("utf-8")
-    data_uri = f"data:{mime};base64,{b64}"
-
-    user_service.users[uid]["avatar"] = data_uri
-    user_service._save()
-
-    return {
-        "id": uid,
-        "username": user_service.users[uid]["username"],
-        "avatar": data_uri
-    }
-
-@router.patch("/auth/profile")
-async def update_profile(x_user_id: Optional[str] = Header("default"), avatar: Optional[str] = Body(None, embed=True)):
-    """Update user profile fields (e.g. emoji avatar)."""
-    uid = x_user_id or "default"
-    if uid not in user_service.users:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
-
-    if avatar is not None:
-        user_service.users[uid]["avatar"] = avatar
-        user_service._save()
-
-    return user_service.get_user(uid)
-
-@router.delete("/users/{user_id}")
-async def delete_user(user_id: str):
-    success = user_service.delete_user(user_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
-    return {"status": "ok", "message": f"Utilisateur {user_id} et toutes ses données supprimés."}
-
 def _folder_size(base_dir: str) -> int:
     total_bytes = 0
     if os.path.exists(base_dir):
@@ -277,7 +190,7 @@ def _folder_size(base_dir: str) -> int:
     return total_bytes
 
 @router.get("/users/stats")
-async def get_user_stats(x_user_id: Optional[str] = Header("default")):
+async def get_user_stats(x_user_id: str = Depends(session_user_id)):
     stats = history_service.get_user_stats(user_id=x_user_id or "default", canonical=yoitsu_gateway.canonical_id)
     # Also calculate local disk storage used
     root_folder = settings_service.get_root_folder()
@@ -303,7 +216,7 @@ async def get_random_catalog(count: int = Query(12, ge=1, le=50)):
     return {"total": len(random_animes), "results": random_animes}
 
 @router.get("/catalog/recent")
-async def get_recent_animes(x_user_id: Optional[str] = Header("default")):
+async def get_recent_animes(x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or "default"
     recents = yoitsu_gateway.recents(user_id=uid)
     if cache_service.recents_missing_cover(uid):
@@ -315,7 +228,7 @@ async def get_recent_animes(x_user_id: Optional[str] = Header("default")):
 async def get_catalog_status():
     return await catalog_service.get_update_status()
 
-@router.post("/catalog/update")
+@router.post("/catalog/update", dependencies=[Depends(require_admin)])
 async def trigger_catalog_update(source: str = Query("all", description="'all', 'anime_sama' ou 'voiranime'")):
     return await catalog_service.trigger_update(source=source)
 
@@ -337,7 +250,7 @@ async def lookup_anime(
 async def get_anime_entity(
     entity_id: str,
     refresh: bool = Query(False, description="Forcer l'invalidation du cache"),
-    x_user_id: Optional[str] = Header("default")
+    x_user_id: str = Depends(session_user_id)
 ):
     uid = x_user_id or "default"
     details = await yoitsu_gateway.details(entity_id, refresh=refresh, user_id=uid)
@@ -362,7 +275,7 @@ async def get_sources(refresh: bool = Query(False)):
 class SourceSwitchPayload(BaseModel):
     enabled: bool
 
-@router.post("/sources/{source}")
+@router.post("/sources/{source}", dependencies=[Depends(require_admin)])
 async def set_source_enabled(source: str, payload: SourceSwitchPayload):
     if source not in ("anime_sama", "voiranime"):
         raise HTTPException(status_code=404, detail="Source inconnue.")
@@ -372,7 +285,7 @@ async def set_source_enabled(source: str, payload: SourceSwitchPayload):
 class CookiePayload(BaseModel):
     cookie: str = Field(..., min_length=10, max_length=4000)
 
-@router.post("/sources/voiranime/cookie")
+@router.post("/sources/voiranime/cookie", dependencies=[Depends(require_admin)])
 async def set_voiranime_cookie(payload: CookiePayload):
     # voiranime_API can pass Cloudflare with the browser's cf_clearance cookie (its /api/setCookie route)
     api = yoitsu_service.api_link("VOIRANIME")
@@ -440,7 +353,7 @@ async def get_details(
     url: str = Query(..., description="URL d'un anime"),
     source: str = Query(..., description="Source ('anime_sama' ou 'voiranime')"),
     refresh: bool = Query(False, description="Forcer l'invalidation du cache"),
-    x_user_id: Optional[str] = Header("default")
+    x_user_id: str = Depends(session_user_id)
 ):
     details = await catalog_service.get_details(url=url, source=source, refresh=refresh, user_id=x_user_id or "default")
     if not details:
@@ -520,13 +433,13 @@ async def get_scans_list(anime_title: str = Query(...)):
     chapters = await _scans_summary(anime_title)
     return {"title": anime_title, "total": len(chapters), "chapters": chapters}
 
-@router.post("/scans/download")
-async def download_scan_endpoint(payload: DownloadScanPayload):
+@router.post("/scans/download", dependencies=[Depends(require_server_downloads)])
+async def download_scan_endpoint(payload: DownloadScanPayload, x_user_id: str = Depends(session_user_id)):
     try:
         if payload.chapter_num is not None:
-            res = await yoitsu_service.download_chapter(payload.anime_title, payload.chapter_num)
+            res = await yoitsu_service.download_chapter(payload.anime_title, payload.chapter_num, owner=x_user_id)
         else:
-            res = await yoitsu_service.download_all_scans(payload.anime_title)
+            res = await yoitsu_service.download_all_scans(payload.anime_title, owner=x_user_id)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -680,7 +593,7 @@ async def get_downloaded_library():
     lib = await asyncio.to_thread(cache_service.scan_downloaded_library, root_folder)
     return {"total_animes": len(lib), "library": lib}
 
-@router.delete("/library/episode")
+@router.delete("/library/episode", dependencies=[Depends(require_admin)])
 async def delete_downloaded_episode(file_path: str = Query(..., description="Chemin absolu du fichier épisode ou dossier de chapitre")):
     """Delete a single downloaded episode file or chapter scan folder from disk."""
     decoded_path = _media_path_or_404(file_path, "Fichier ou dossier")
@@ -705,7 +618,7 @@ async def delete_downloaded_episode(file_path: str = Query(..., description="Che
         raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
     return {"status": "deleted", "file_path": decoded_path}
 
-@router.delete("/library/anime")
+@router.delete("/library/anime", dependencies=[Depends(require_admin)])
 async def delete_downloaded_anime(
     anime_title: str = Query(..., description="Titre de l'anime (nom du dossier sanitizé)")
 ):
@@ -735,12 +648,12 @@ async def delete_downloaded_anime(
 
 # --- Watch History & Progress Routes ---
 @router.get("/history")
-async def get_history(x_user_id: Optional[str] = Header("default")):
+async def get_history(x_user_id: str = Depends(session_user_id)):
     return history_service.get_history_for_client(user_id=x_user_id or "default", canonical=yoitsu_gateway.canonical_id,
                                                   media=yoitsu_gateway.anilist.cached)
 
 @router.get("/history/continue")
-async def get_continue_watching(limit: int = Query(20, ge=1, le=100), x_user_id: Optional[str] = Header("default")):
+async def get_continue_watching(limit: int = Query(20, ge=1, le=100), x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or "default"
     if yoitsu_gateway.index.catalog_loaded and uid not in _linking_users:
         pending = history_service.unlinked_titles(uid)
@@ -753,7 +666,7 @@ async def get_continue_watching(limit: int = Query(20, ge=1, le=100), x_user_id:
 async def resume_history(
     anime_title: str = Query(..., description="Titre de l'enregistrement d'historique"),
     season: str = Query(..., description="Nom de saison de l'historique (ex: Saison 1 VF)"),
-    x_user_id: Optional[str] = Header("default")
+    x_user_id: str = Depends(session_user_id)
 ):
     """Strict resume target of a history record: its linked entity, season variant and episode list."""
     uid = x_user_id or "default"
@@ -816,7 +729,7 @@ async def resume_history(
     }
 
 @router.post("/history/progress")
-async def save_progress(payload: ProgressPayload, x_user_id: Optional[str] = Header(None)):
+async def save_progress(payload: ProgressPayload, x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or payload.user_id or "default"
     res = history_service.save_progress(
         user_id=uid,
@@ -837,7 +750,7 @@ async def save_progress(payload: ProgressPayload, x_user_id: Optional[str] = Hea
     return res
 
 @router.post("/history/toggle-watched")
-async def toggle_watched(payload: ToggleWatchedPayload, x_user_id: Optional[str] = Header(None)):
+async def toggle_watched(payload: ToggleWatchedPayload, x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or payload.user_id or "default"
     is_watched = history_service.toggle_watched(
         user_id=uid,
@@ -855,7 +768,7 @@ async def toggle_watched(payload: ToggleWatchedPayload, x_user_id: Optional[str]
     return {"watched": is_watched}
 
 @router.post("/history/mark-season")
-async def mark_season(payload: MarkSeasonPayload, x_user_id: Optional[str] = Header(None)):
+async def mark_season(payload: MarkSeasonPayload, x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or payload.user_id or "default"
     history_service.mark_season(
         user_id=uid,
@@ -875,13 +788,13 @@ async def mark_season(payload: MarkSeasonPayload, x_user_id: Optional[str] = Hea
 async def delete_history_item(
     anime_title: str = Query(...),
     ep_key: Optional[str] = Query(None),
-    x_user_id: Optional[str] = Header("default")
+    x_user_id: str = Depends(session_user_id)
 ):
     history_service.delete_item(x_user_id or "default", anime_title, ep_key)
     return {"status": "ok"}
 
 @router.delete("/history/clear")
-async def clear_history(x_user_id: Optional[str] = Header("default")):
+async def clear_history(x_user_id: str = Depends(session_user_id)):
     history_service.clear_user_history(x_user_id or "default")
     return {"status": "ok"}
 
@@ -892,11 +805,11 @@ def _watchlist_response(uid: str) -> dict:
     return {"total": len(items), "results": items}
 
 @router.get("/watchlist")
-async def get_watchlist(x_user_id: Optional[str] = Header("default")):
+async def get_watchlist(x_user_id: str = Depends(session_user_id)):
     return _watchlist_response(x_user_id or "default")
 
 @router.post("/watchlist")
-async def add_to_watchlist(payload: WatchlistPayload, x_user_id: Optional[str] = Header(None)):
+async def add_to_watchlist(payload: WatchlistPayload, x_user_id: str = Depends(session_user_id)):
     uid = x_user_id or payload.user_id or "default"
     if uid != "default" and uid not in user_service.users:
         # Never a bucket for an id no profile owns (the store would grow with any header value)
@@ -919,7 +832,7 @@ async def remove_from_watchlist(
     anime_id: str = Query("", alias="id", description="Identifiant de l'anime"),
     source: str = Query("", description="Source de l'entrée principale"),
     url: str = Query("", description="URL de l'entrée principale"),
-    x_user_id: Optional[str] = Header("default")
+    x_user_id: str = Depends(session_user_id)
 ):
     # Query parameters, not a path: ids are percent-encoded
     if not anime_id and not (source and url):
@@ -931,21 +844,30 @@ async def remove_from_watchlist(
 
 # --- Settings & Download Routes ---
 @router.get("/settings")
-async def get_settings():
-    return settings_service.get_settings()
+async def get_settings(request: Request):
+    settings = settings_service.get_settings()
+    if is_admin(request):
+        return settings
+    return {k: settings.get(k) for k in ("download_quality", "max_concurrent_downloads", "server_downloads")}
 
-@router.post("/settings")
+@router.post("/settings", dependencies=[Depends(require_admin)])
 async def update_settings(payload: SettingsUpdate):
     updated = settings_service.update_settings(payload.model_dump(exclude_unset=True))
     return updated
 
 @router.get("/downloads")
-async def get_downloads():
-    return download_service.get_all_tasks()
+async def get_downloads(request: Request, x_user_id: str = Depends(session_user_id)):
+    # Everyone sees his own downloads; the administrator sees all of them, with who asked
+    tasks = download_service.get_all_tasks()
+    if is_admin(request):
+        names = {uid: u["username"] for uid, u in user_service.users.items()}
+        return [{**t, "owner_name": names.get(t.get("owner"), "")} for t in tasks]
+    return [t for t in tasks if t.get("owner") == x_user_id]
 
-@router.post("/downloads")
-async def add_download(payload: DownloadCreate):
+@router.post("/downloads", dependencies=[Depends(require_server_downloads)])
+async def add_download(payload: DownloadCreate, x_user_id: str = Depends(session_user_id)):
     task = download_service.add_task(
+        owner=x_user_id,
         anime_title=payload.anime_title,
         season=payload.season,
         episode_num=payload.episode_num,
@@ -955,11 +877,12 @@ async def add_download(payload: DownloadCreate):
     )
     return task.to_dict()
 
-@router.post("/downloads/bulk")
-async def add_bulk_download(payload: BulkDownloadCreate):
+@router.post("/downloads/bulk", dependencies=[Depends(require_server_downloads)])
+async def add_bulk_download(payload: BulkDownloadCreate, x_user_id: str = Depends(session_user_id)):
     added_tasks = []
     for ep in payload.episodes:
         t = download_service.add_task(
+            owner=x_user_id,
             anime_title=payload.anime_title,
             season=payload.season,
             episode_num=ep.get("episode_num", "1"),
@@ -971,15 +894,17 @@ async def add_bulk_download(payload: BulkDownloadCreate):
     return {"total_added": len(added_tasks), "tasks": added_tasks}
 
 @router.post("/downloads/cancel/{task_id}")
-async def cancel_download(task_id: str):
-    success = download_service.cancel_task(task_id)
-    if not success:
+async def cancel_download(task_id: str, request: Request, x_user_id: str = Depends(session_user_id)):
+    task = download_service.tasks.get(task_id)
+    if not task or (task.owner != x_user_id and not is_admin(request)):
         raise HTTPException(status_code=404, detail="Tâche non trouvée")
+    download_service.cancel_task(task_id)
     return {"status": "cancelled", "task_id": task_id}
 
 @router.post("/downloads/clear")
-async def clear_downloads():
-    download_service.clear_completed()
+async def clear_downloads(request: Request, x_user_id: str = Depends(session_user_id)):
+    # The administrator clears the finished downloads of everyone, the others their own
+    download_service.clear_completed(None if is_admin(request) else x_user_id)
     return {"status": "cleared"}
 
 # --- In-App Updates & Component Management ---
@@ -993,14 +918,14 @@ async def server_boot():
     # Changes on every start: the interface reloads once Nami has restarted after an update
     return {"boot": _BOOT_ID}
 
-@router.get("/updates/check")
+@router.get("/updates/check", dependencies=[Depends(require_admin)])
 async def check_updates():
     # Nami itself first, then its APIs and YoitsuWrap
     # git ls-remote + PyPI lookups: several seconds of blocking I/O
     nami, others = await asyncio.gather(asyncio.to_thread(self_update.status), asyncio.to_thread(update_service.check_all_updates))
     return {"nami": nami, **others}
 
-@router.post("/updates/apply")
+@router.post("/updates/apply", dependencies=[Depends(require_admin)])
 async def apply_update(target: str = Query(..., pattern="^(nami|animesama|voiranime|yoitsuwrap|all)$",
                                            description="'nami', 'animesama', 'voiranime', 'yoitsuwrap', or 'all' (the APIs and YoitsuWrap)")):
     # git pull, pip install and process restarts must not freeze the server

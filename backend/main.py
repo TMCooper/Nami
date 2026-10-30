@@ -194,6 +194,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Every /api route needs a session (backend/security.py). Added before CORS so that CORS, the outer
+# layer, still answers preflight requests
+from backend.security import guard as _security_guard
+app.middleware("http")(_security_guard)
+
 # The UI is served by this same server (and proxied by Vite in dev), so only explicit
 # extra origins are allowed: NAMI_CORS_ORIGINS="http://host:port,..."
 _extra_origins = [o.strip() for o in os.environ.get("NAMI_CORS_ORIGINS", "").split(",") if o.strip()]
@@ -207,7 +212,9 @@ app.add_middleware(
 from backend.routers.api import router as api_router
 from backend.routers.stream_proxy import router as proxy_router
 from backend.routers.fiche_download import router as fiche_download_router
+from backend.routers.auth import router as auth_router
 
+app.include_router(auth_router)
 app.include_router(api_router)
 app.include_router(proxy_router)
 app.include_router(fiche_download_router)

@@ -402,7 +402,7 @@ async def get_season_episodes(
             })
         return {"total": len(episodes), "episodes": episodes, "is_scans": True}
 
-    if "voir-anime" in season_url:
+    if source_health.is_source_url("voiranime", season_url):
         # Loading a season tab is not "viewing an anime": keep it out of the recents shelf
         va_details = await catalog_service.get_details(url=season_url, source="voiranime", refresh=refresh, track_recent=False)
         episodes = va_details.get("episodes", [])

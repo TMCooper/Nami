@@ -37,7 +37,6 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.
 META_DIR = os.path.join(DATA_DIR, "meta")
 
 SOURCES = {"anime_sama": "ANIMESAMA", "voiranime": "VOIRANIME"}
-SOURCE_HOSTS = {"anime_sama": "anime-sama", "voiranime": "voir-anime"}
 CATALOG_REFRESH = 1800          # seconds between catalogue snapshots (sibling evidence for grouping)
 CATALOG_RETRY = 60
 DETAILS_ANILIST_WAIT = 3.0
@@ -373,7 +372,7 @@ class YoitsuGateway:
         if not isinstance(source, str) or not isinstance(url, str) or source not in SOURCES:
             return False
         host = url_host(url)  # None: unparsable ('https://[bad'), never a source page
-        return host is not None and url.startswith(("http://", "https://")) and SOURCE_HOSTS[source] in host
+        return host is not None and url.startswith(("http://", "https://")) and source_health.matches_source_host(source, host)
 
     async def lookup(self, source: str, url: str, title: str) -> Optional[dict]:
         """Entity of one source entry (history / legacy links only know source + url + title)."""
@@ -802,7 +801,7 @@ class YoitsuGateway:
             slot = by_label.setdefault(display_of(label), {"label": label, "display": display_of(label), "vostfr": None, "vf": None})
             for version, field in (("vostfr", "_vostfr_url"), ("vf", "_vf_url")):
                 url = r.get(field)
-                if url and not slot[version] and slug_of(url) not in placed and SOURCE_HOSTS["voiranime"] in (url_host(url) or ""):
+                if url and not slot[version] and slug_of(url) not in placed and source_health.matches_source_host("voiranime", url_host(url)):
                     slot[version] = url
                     placed.add(slug_of(url))
         by_label = {k: v for k, v in by_label.items() if v["vostfr"] or v["vf"]}

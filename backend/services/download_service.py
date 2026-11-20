@@ -42,7 +42,8 @@ def resolve_anime_folder(base_dir: str, anime_title: str) -> str:
     return candidate
 
 def _needs_resolution(url: str) -> bool:
-    return "voir-anime.to" in url or ("http" in url and not any(ext in url for ext in [".m3u8", ".mp4", ".ts"]))
+    from backend.services.source_health import source_health
+    return source_health.is_source_url("voiranime", url) or ("http" in url and not any(ext in url for ext in [".m3u8", ".mp4", ".ts"]))
 
 
 class DownloadTask:

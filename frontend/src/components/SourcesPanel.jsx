@@ -9,6 +9,14 @@ const STATUS = {
   unknown: { label: 'Vérification…', color: 'var(--text-muted)' }
 };
 
+const hostOf = (url) => {
+  try {
+    return url ? new URL(url).hostname : '';
+  } catch {
+    return '';
+  }
+};
+
 // State of each source (its API and the site behind it) with an on/off switch; VoirAnime can get a Cloudflare cookie
 export default function SourcesPanel({ onChange }) {
   const [sources, setSources] = useState(null);
@@ -67,12 +75,14 @@ export default function SourcesPanel({ onChange }) {
         <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Vérification des sources…</p>
       ) : Object.entries(sources).map(([key, s]) => {
         const status = s.enabled ? (STATUS[s.status] || STATUS.unknown) : { label: 'Désactivée', color: 'var(--text-dim)' };
+        const domain = hostOf(s.url);
         return (
           <div key={key} className="surface-card" style={{ padding: '10px 12px', borderRadius: 'var(--radius-sm)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                 <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: status.color, flexShrink: 0 }} />
                 <strong style={{ fontSize: '0.9rem' }}>{s.label}</strong>
+                {domain && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>{domain}</span>}
                 <span style={{ fontSize: '0.76rem', color: status.color }}>{status.label}</span>
               </div>
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', cursor: 'pointer' }}>
@@ -84,7 +94,7 @@ export default function SourcesPanel({ onChange }) {
             {key === 'voiranime' && s.enabled && s.status === 'cloudflare' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                  Ouvrez voir-anime.to dans votre navigateur, passez la vérification, puis copiez ici la valeur du cookie <code>cf_clearance</code>.
+                  Ouvrez {domain || 'voiranime.cx'} dans votre navigateur, passez la vérification, puis copiez ici la valeur du cookie <code>cf_clearance</code>.
                 </p>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <input className="input-field" style={{ flex: 1, minWidth: 0 }} value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="cf_clearance=…" />

@@ -382,7 +382,8 @@ def wrapper_episodes(season: dict, api_episodes: List[dict], fresh: bool, api_so
     out = []
     for w in season.get("episodes") or []:
         api = api_by_num.pop(w["num"], None) or {}
-        fallbacks = api.get("players") or ([{"host": "VoirAnime" if "voir-anime" in api["embed_url"] else "Source",
+        from backend.services.source_health import source_health
+        fallbacks = api.get("players") or ([{"host": "VoirAnime" if source_health.is_source_url("voiranime", api["embed_url"]) else "Source",
                                              "embed_url": api["embed_url"]}] if api.get("embed_url") else [])
         fallbacks = [p for p in fallbacks if p.get("embed_url") and p["embed_url"] != w["link"]]
         verified = {"host": WRAPPER_HOST, "embed_url": w["link"], "verified": fresh, "source": w.get("source")}

@@ -76,6 +76,29 @@ def test_checks_tell_a_stopped_api_from_a_blocked_site():
     assert asyncio.run(check("anime_sama"))["status"] == "ok"
 
 
+def test_checks_learn_the_active_domain_from_the_api():
+    probed = []
+
+    def rotated(request):
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"API Status": "Online"})
+        if request.url.path.endswith("/getVoirAnimeURL"):
+            return httpx.Response(200, json={"url": "https://va-rotated.example"})
+        probed.append(str(request.url))
+        return httpx.Response(200)
+
+    health, check = _health_with(rotated)
+    res = asyncio.run(check("voiranime"))
+    assert res["status"] == "ok"
+    assert probed == ["https://va-rotated.example/"]
+    assert health.site_url("voiranime") == "https://va-rotated.example/"
+    assert health.snapshot()["voiranime"]["url"] == "https://va-rotated.example/"
+    assert health.is_source_url("voiranime", "https://va-rotated.example/anime/frieren/")
+    assert health.is_source_url("voiranime", "https://voiranime.cx/anime/frieren/")
+    assert health.is_source_url("voiranime", "https://voir-anime.to/anime/frieren/")
+    assert not health.is_source_url("voiranime", "https://evil.example/anime/frieren/")
+
+
 def test_down_sources_are_skipped_without_waiting(tmp_path, monkeypatch, settings):
     from backend.yoitsu import gateway as gateway_module
     gw = _make_gateway(tmp_path, monkeypatch, [], [], [])

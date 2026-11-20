@@ -12,6 +12,17 @@ from backend.services.cover_registry import cover_registry
 from backend.services.cover_utils import (
     client_cover_url, raw_cover_url, is_usable_cover, is_trusted_cover, extract_page_cover
 )
+from backend.services.source_health import source_health
+
+
+def _origin_referer(url: str, source: str) -> str:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}/"
+    except ValueError:
+        pass
+    return source_health.site_url(source)
 
 AS_API_BASE = "http://127.0.0.1:5000"
 VA_API_BASE = "http://127.0.0.1:8000"
@@ -235,7 +246,7 @@ class CatalogService:
             if cov or self._cover_missed_recently(url):
                 return cov
             try:
-                r = await self.client.get(url, timeout=4.0, headers={"Referer": "https://voir-anime.to/"})
+                r = await self.client.get(url, timeout=4.0, headers={"Referer": _origin_referer(url, "voiranime")})
                 if r.status_code == 200:
                     c_url = extract_page_cover(BeautifulSoup(r.text, 'html.parser'), str(r.url))
                     if c_url:
@@ -604,16 +615,17 @@ class CatalogService:
         }
         raw_slug = url.rstrip("/").split("/")[-1]
         slug = ALIASES.get(raw_slug, raw_slug)
-        target_url = url if slug == raw_slug else f"https://anime-sama.to/catalogue/{slug}/"
+        as_base = source_health.site_url("anime_sama").rstrip("/")
+        target_url = url if slug == raw_slug else f"{as_base}/catalogue/{slug}/"
         default_cover = f"https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/{slug}.jpg"
 
         # 1. Try scraping the catalogue page directly on Anime-Sama
         try:
-            fetch_url = target_url.replace("anime-sama.fr", "anime-sama.to")
+            fetch_url = target_url.replace("https://anime-sama.fr", as_base).replace("http://anime-sama.fr", as_base)
             resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
-                # Stale mirror domains redirect to the home page: retry on the main domain
-                fetch_url = f"https://anime-sama.to/catalogue/{slug}/"
+                # Stale mirror domains redirect to the home page: retry on the active domain
+                fetch_url = f"{as_base}/catalogue/{slug}/"
                 resp = await self.client.get(fetch_url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200 and "/catalogue/" in str(resp.url):
                 soup = BeautifulSoup(resp.text, 'html.parser')
@@ -696,7 +708,7 @@ class CatalogService:
 
         # Scrape anime page on VoirAnime to get cover and synopsis directly
         try:
-            page_resp = await self.client.get(url, timeout=8.0, headers={"Referer": "https://voir-anime.to/"})
+            page_resp = await self.client.get(url, timeout=8.0, headers={"Referer": _origin_referer(url, "voiranime")})
             if page_resp.status_code == 200:
                 page_scraped = True
                 soup = BeautifulSoup(page_resp.text, 'html.parser')
@@ -920,7 +932,7 @@ class CatalogService:
 
     async def extract_voiranime_players(self, episode_url: str) -> list:
         try:
-            page_resp = await self.client.get(episode_url, headers={**HEADERS, "Referer": "https://voir-anime.to/"}, timeout=8.0)
+            page_resp = await self.client.get(episode_url, headers={**HEADERS, "Referer": _origin_referer(episode_url, "voiranime")}, timeout=8.0)
             if page_resp.status_code == 200:
                 return self.parse_voiranime_players(page_resp.text)
         except Exception as e:
@@ -1006,7 +1018,8 @@ class CatalogService:
         try:
             resp = await self.client.get(url, timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200 and "/catalogue/" not in str(resp.url):
-                resp = await self.client.get(f"https://anime-sama.to/catalogue/{slug}/", timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
+                as_base = source_health.site_url("anime_sama").rstrip("/")
+                resp = await self.client.get(f"{as_base}/catalogue/{slug}/", timeout=8.0, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code != 200 or f"/catalogue/{slug}" not in str(resp.url).lower():
                 return None
         except Exception as e:
@@ -1057,7 +1070,7 @@ class CatalogService:
             return result
 
         # Special handling for VoirAnime: episode URL is a webpage, extract the real video player iframe!
-        if "voir-anime.to" in target_embed or source == "voiranime":
+        if source_health.is_source_url("voiranime", target_embed) or source == "voiranime":
             players = await self.extract_voiranime_players(target_embed)
             if players:
                 target_embed = players[0]["embed_url"]
